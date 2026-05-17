@@ -39,7 +39,7 @@ void Encoder_Config(void)
 {
     /* 1. Enable clocks */
     RCC->APB1ENR1 |= RCC_APB1ENR1_TIM2EN;
-    RCC->AHB1ENR  |= RCC_AHB1ENR_GPIOAEN;
+    RCC->AHB2ENR  |= RCC_AHB2ENR_GPIOAEN;
 
     /* 2. PA0 (TI1), PA1 (TI2) → AF1, pull-up */
     GPIOA->MODER  &= ~(GPIO_MODER_MODE0    | GPIO_MODER_MODE1);
@@ -84,6 +84,10 @@ int32_t Encoder_GetCount(void)
     return (int32_t)TIM2->CNT;
 }
 
+float Encoder_GetRevolutions(void)
+{
+    return (float)Encoder_GetCount() / COUNTS_PER_REV;
+}
 
 float Encoder_GetDegrees(void)
 {
