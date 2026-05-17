@@ -28,3 +28,19 @@ void PI_Reset(PI_Controller *pi)
 {
     pi->integral = 0.0f;
 }
+
+PI_Controller speed_pi;
+volatile float target_rpm = 0.0f;
+
+void TIM5_IRQHandler(void)
+{
+    if (TIM5->SR & TIM_SR_UIF)
+    {
+        TIM5->SR &= ~TIM_SR_UIF;
+
+        float velocity   = Encoder_GetVelocityRPM();
+        float duty_cycle = PI_Update(&speed_pi, target_rpm, velocity);
+
+        /* write duty_cycle to PWM */
+    }
+}
