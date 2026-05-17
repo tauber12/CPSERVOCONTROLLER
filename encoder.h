@@ -42,6 +42,7 @@
 
 void    Encoder_Config(void);
 int32_t Encoder_GetCount(void);
+float Encoder_GetRevolutions(void);
 float Encoder_GetDegrees(void);
 float   Encoder_GetVelocityCPS(void);
 float   Encoder_GetVelocityRPM(void);
