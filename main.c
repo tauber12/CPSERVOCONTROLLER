@@ -1,23 +1,29 @@
-
 #include "main.h"
 
 void SystemClock_Config(void);
+
+MotorController_t ctx = {0};
 
 int main(void)
 {
 
   HAL_Init();
   SystemClock_Config();
-  clk_CONFIG_48MHz();
+  //clk_CONFIG_48MHz();
   setup_TIM1_A8();
+  GPIOC_C1_C2_Output_Init();
+  setup_LOOPTIMERS();
+  Encoder_Config();
 
+  PI_Init(&ctx, 15.0f, 0.001f, 0.001f);  // 5kHz → dt = 200µs
 
   while (1)
   {
-	  for(uint8_t i = 1; i <= 100; i++){
+
+	  /*for(uint8_t i = 1; i <= 100; i++){
 		  set_DUTY(i);
 		  HAL_Delay(25000);
-	  }
+	  }*/
 
   }
 
@@ -41,7 +47,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
+  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -57,7 +63,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }

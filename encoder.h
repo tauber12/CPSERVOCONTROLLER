@@ -22,7 +22,7 @@
  * Version History
  *  Ver.|   Date   |  Description
  *  ---------------------------------------------------------------------------
- *      |          | 
+ *      |          |
  *******************************************************************************
  *
  * Header format adapted from [Code Appendix by Kevin Vo] pg 5
@@ -48,3 +48,4 @@ float   Encoder_GetVelocityCPS(void);
 float   Encoder_GetVelocityRPM(void);
 
 #endif /* INC_ENCODER_H_ */
+

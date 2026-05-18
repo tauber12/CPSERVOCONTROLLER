@@ -11,7 +11,6 @@
 
 //change clock to 48MHz from default 4MHz
 void clk_CONFIG_48MHz( void ){
-
 	// flash latency first??
 	FLASH->ACR &= ~FLASH_ACR_LATENCY;
 	FLASH->ACR |=  FLASH_ACR_LATENCY_2WS;
@@ -31,7 +30,8 @@ void clk_CONFIG_48MHz( void ){
  * action   :
  * version  : 0.1
  * date     : 260428
- * usage    : 
+ * usage    : called once in main.c during initialization; iDutyCycle sets
+ *            initial compare threshold in timer ticks
  *----------------------------------------------------------------------------*/
 
 void setup_TIM1_A8( void ) {
@@ -40,7 +40,7 @@ void setup_TIM1_A8( void ) {
 	RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
 	GPIOA->MODER  &= ~(3U << 16);
 	GPIOA->MODER  |=  (2U << 16);   // AF mode for PA8
-    GPIOA->AFR[1] &= ~(0xF << 0);
+   GPIOA->AFR[1] &= ~(0xF << 0);
 	GPIOA->AFR[1] |=  (1U << 0);    // AF1 = TIM1 on PA8
 
 	RCC->APB2ENR |= RCC_APB2ENR_TIM1EN;
