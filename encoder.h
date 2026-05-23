@@ -29,22 +29,30 @@
  */
 
 
-#ifndef INC_ENCODER_H_
-#define INC_ENCODER_H_
+#ifndef ENCODER_H
+#define ENCODER_H
 
-#include "stm32l4xx_hal.h"
+#include "stm32l4xx.h"
 #include <stdint.h>
 
+/* ── Configuration ────────────────────────────────────────────────────────── */
 #define PPR              7
 #define GEAR_RATIO       150
-#define COUNTS_PER_REV   (PPR * GEAR_RATIO * 4)   // 4,200
-#define CONTROL_LOOP_HZ  100
+#define COUNTS_PER_REV   (PPR * GEAR_RATIO * 4)   // 4200
+#define CONTROL_LOOP_HZ  1000
 
+/* ── Initialisation ───────────────────────────────────────────────────────── */
 void    Encoder_Config(void);
-int32_t Encoder_GetCount(void);
-float Encoder_GetRevolutions(void);
-float Encoder_GetDegrees(void);
-float   Encoder_GetVelocityCPS(void);
-float   Encoder_GetVelocityRPM(void);
+void    TIM3_InputCapture_Init(void);
 
-#endif /* INC_ENCODER_H_ */
+/* ── Position ─────────────────────────────────────────────────────────────── */
+int32_t Encoder_GetCount(void);
+float   Encoder_GetRevolutions(void);
+float   Encoder_GetDegrees(void);
+
+/* ── Velocity ─────────────────────────────────────────────────────────────── */
+float   Encoder_GetVelocityCPS(void);       // differentiation — counts/sec
+float   Encoder_GetVelocityRPM(void);       // differentiation — RPM
+float   Encoder_GetVelocityIC_RPM(void);    // input capture  — RPM (precise at low speed)
+
+#endif /* ENCODER_H */
