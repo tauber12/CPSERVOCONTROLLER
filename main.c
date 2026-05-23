@@ -10,19 +10,21 @@ int main(void)
 
   HAL_Init();
   SystemClock_Config();
+  NVIC_SetPriority(TIM5_IRQn,      1);
+  NVIC_SetPriority(TIM6_DAC_IRQn,  2);
+  NVIC_SetPriority(ADC1_2_IRQn,    3);
+  PI_Init(&ctx_pos, 1.0f, 0.001f, 0.001f, -200, 200);  // 5 → dt = 200µs
+  PI_Init(&ctx_vel, 1.0f, 0.001f, 0.01f, -100, 100);  // 5kHz → dt = 200µs
+  GPIOC_C3_C4_Output_Init();
   //clk_CONFIG_48MHz();
   setup_TIM1_A8();
-  GPIOC_C1_C2_Output_Init();
   setup_LOOPTIMERS();
   Encoder_Config();
+  ADC_init();
 
-  PI_Init(&ctx_pos, 15.0f, 0.001f, 0.001f);  // 5 → dt = 200µs
-  PI_Init(&ctx_vel, 15.0f, 0.001f, 0.001f);  // 5kHz → dt = 200µs
 
   while (1)
   {
-	  ctx_vel.target = target;
-	  HAL_Delay(5);
 
 	  /*for(uint8_t i = 1; i <= 100; i++){
 		  set_DUTY(i);

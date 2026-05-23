@@ -8,6 +8,22 @@
 #include "motor.h"
 
 // Enable clock, then configure IN1/IN2 as output
+void GPIOC_C3_C4_Output_Init(void)
+{
+    // 1. Enable GPIOC peripheral clock
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
+    // 2. Set PC3 and PC4 mode to output: MODER bits = 01
+    MOTOR_PORT->MODER &= ~((3U << (3 * 2)) | (3U << (4 * 2)));
+    MOTOR_PORT->MODER |=  ((1U << (3 * 2)) | (1U << (4 * 2)));
+    // 3. Set output type to push-pull: OTYPER bits = 0
+    MOTOR_PORT->OTYPER &= ~((1U << 3) | (1U << 4));
+    // 4. Set speed to low: OSPEEDR bits = 00
+    MOTOR_PORT->OSPEEDR &= ~((3U << (3 * 2)) | (3U << (4 * 2)));
+    // 5. Disable pull-up / pull-down: PUPDR bits = 00
+    MOTOR_PORT->PUPDR &= ~((3U << (3 * 2)) | (3U << (4 * 2)));
+    // 6. Set initial output low
+    MOTOR_PORT->BSRR = (1U << (3 + 16)) | (1U << (4 + 16));
+}
 
 //change clock to 48MHz from default 4MHz
 void clk_CONFIG_48MHz( void ){
@@ -70,23 +86,20 @@ void set_DUTY( uint8_t iDutyCycle ) {
     }
 }
 
-void set_Motor_Direction( float velocity ){
+void set_Motor_Direction( bool direction ){
 
-	if( velocity > 0){
+	if( direction ){
 		//pc3 pc4
-		GPIOA -> BSRR = (DIRECTION_PIN_1 | (DIRECTION_PIN_2 << 16));
+		MOTOR_PORT -> BSRR = (DIRECTION_PIN_1 | (DIRECTION_PIN_2 << 16));
 
 	} else {
-		GPIOA -> BSRR = (DIRECTION_PIN_2 | (DIRECTION_PIN_1 << 16));
+		MOTOR_PORT -> BSRR = (DIRECTION_PIN_2 | (DIRECTION_PIN_1 << 16));
 
 	}
-
 }
 
-void update_Motor_Velocity( float desired_PWM , float velocity ){
-
-	set_Motor_Direction( velocity );
-	set_DUTY( (uint8_t) desired_PWM );
-
+void update_Motor_Velocity(float desired_PWM)
+{
+    set_Motor_Direction(desired_PWM > 0 ? 1 : 0);
+    set_DUTY((uint8_t)(desired_PWM < 0 ? -desired_PWM : desired_PWM));
 }
-
