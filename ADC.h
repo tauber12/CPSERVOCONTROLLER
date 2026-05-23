@@ -33,7 +33,6 @@
 #define INC_ADC_C_
 
 #include "stm32l4xx_hal.h"
-#include "delay.h"
 
 extern volatile uint16_t rawVoltageData;
 
