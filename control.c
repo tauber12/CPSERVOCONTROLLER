@@ -9,30 +9,8 @@
 
 // tim_isr.c  — control loop ISRs
 #include "control.h"
-#include "stm32l4a6xx.h"
 
 
-void GPIOC_C1_C2_Output_Init(void)
-{
-    // 1. Enable GPIOC peripheral clock
-    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
-
-    // 2. Set PC1 and PC2 mode to output: MODER bits = 01
-    GPIOC->MODER &= ~((3U << (1 * 2)) | (3U << (2 * 2)));
-    GPIOC->MODER |=  ((1U << (1 * 2)) | (1U << (2 * 2)));
-
-    // 3. Set output type to push-pull: OTYPER bits = 0
-    GPIOC->OTYPER &= ~((1U << 1) | (1U << 2));
-
-    // 4. Set speed to low: OSPEEDR bits = 00
-    GPIOC->OSPEEDR &= ~((3U << (1 * 2)) | (3U << (2 * 2)));
-
-    // 5. Disable pull-up / pull-down: PUPDR bits = 00
-    GPIOC->PUPDR &= ~((3U << (1 * 2)) | (3U << (2 * 2)));
-
-    // 6. Optional: set initial output low
-    GPIOC->BSRR = (1U << (1 + 16)) | (1U << (2 + 16));
-}
 
 void setup_LOOPTIMERS(void) {
 
@@ -61,26 +39,34 @@ void setup_LOOPTIMERS(void) {
 
 }
 
-void PI_Init(MotorController_t *ctx, float kp, float ki, float dt)
-{
+void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
+		float lower_limit, float upper_limit) {
     ctx->kp      = kp;
     ctx->ki      = ki;
-    ctx->integrator_vel = 0.0f;
+    ctx->integrator_accum = 0.0f;
     ctx->dt           = dt;  // you'll need to add dt to the struct
+    ctx->output_limit_high = upper_limit;
+    ctx->output_limit_low = lower_limit;
 }
 
 float PI_Update(MotorController_t *ctx, float target, float measured)
 {
     float error = target - measured;
 
-    ctx->integrator_vel += error * ctx->dt;
+    ctx->integrator_accum += error * ctx->dt;
 
-    float output = (ctx->kp * error) + (ctx->ki * ctx->integrator);
+    if (ctx->integrator_accum > 10) {
+   	 ctx->integrator_accum = 10;
+    } else if (ctx->integrator_accum < -10) {
+   	 ctx->integrator_accum = -10;
+    }
+
+    float output = (ctx->kp * error) + (ctx->ki * ctx->integrator_accum);
 
 
     // clamp — you'll need output_limit in struct too
     if      (output >  ctx->output_limit_high) output =  ctx->output_limit_high;
-    else if (output < ctx->output_limit_low) output = ctx.output_limit_low;
+    else if (output < ctx->output_limit_low) output = ctx->output_limit_low;
 
 
     return output;
@@ -88,7 +74,7 @@ float PI_Update(MotorController_t *ctx, float target, float measured)
 
 void PI_Reset(MotorController_t *ctx)
 {
-    ctx->integrator_vel = 0.0f;
+    ctx->integrator_accum = 0.0f;
 }
 
 void TIM5_IRQHandler(void) // velocity control loop
@@ -99,11 +85,11 @@ void TIM5_IRQHandler(void) // velocity control loop
 
         float velocity   = Encoder_GetVelocityRPM();
 
-        target = (uint8_t) ( ( (float) rawVoltageData / 4095 * 400.0 ) - 200.0 );
+        float target = ((float)rawVoltageData / 4095.0f) * 400.0f - 200.0f;
 
-        float pwm_out = PI_Update(&ctx, target, velocity);
+        float pwm_duty = PI_Update(&ctx_vel, target, velocity);
 
-        set_Motor_Velocity( velocity, pwm_out ); // update motor velocity
+        update_Motor_Velocity( pwm_duty ); // update motor velocity
     }
 }
 
