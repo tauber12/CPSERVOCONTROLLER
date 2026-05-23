@@ -33,7 +33,11 @@
 
 #define PPR             7
 #define GEAR_RATIO      150
-#define COUNTS_PER_REV  (PPR * GEAR_RATIO * 4)
+#define COUNTS_PER_REV  (PPR * GEAR_RATIO * 4) // 4200
+#define TIM3_FREQ_HZ    48000000UL
+
+static volatile uint32_t pulse_period      = 0;
+static volatile uint32_t last_capture_time = 0;
 
 void Encoder_Config(void)
 {
@@ -62,7 +66,6 @@ void Encoder_Config(void)
     TIM2->CCMR1 |= (0x2 << TIM_CCMR1_IC2F_Pos);
 
     /* 5. Active high polarity, enable inputs */
-    // Use to configure direction of count with respect to encoder direction
     TIM2->CCER &= ~(TIM_CCER_CC1P  | TIM_CCER_CC2P |
                     TIM_CCER_CC1NP | TIM_CCER_CC2NP);
     TIM2->CCER |=  (TIM_CCER_CC1E  | TIM_CCER_CC2E);
@@ -71,14 +74,83 @@ void Encoder_Config(void)
     TIM2->ARR = 0xFFFFFFFF;
     TIM2->CNT = 0;
 
-    /* 7. Initialise registers, clear any spurious UIF */
+    /* 7. Configure TIM2 TRGO to pulse on each encoder count */
+    TIM2->CR2 &= ~TIM_CR2_MMS;
+    TIM2->CR2 |=  (0b111 << TIM_CR2_MMS_Pos);   // MMS = encoder clock out
+
+    /* 8. Initialise registers, clear any spurious UIF */
     TIM2->EGR |=  TIM_EGR_UG;
     TIM2->SR  &= ~TIM_SR_UIF;
 
-    /* 8. Start counter */
+    /* 9. Start counter */
     TIM2->CR1 |= TIM_CR1_CEN;
 }
 
+void TIM3_InputCapture_Init(void)
+{
+    /* 1. Enable TIM3 clock */
+    RCC->APB1ENR1 |= RCC_APB1ENR1_TIM3EN;
+
+    /* 2. Free running counter, full 32-bit range, 48 MHz tick */
+    TIM3->PSC = 0;
+    TIM3->ARR = 0xFFFFFFFF;
+    TIM3->CNT = 0;
+
+    /* 3. CH1 capture on TRC (internal trigger source) */
+    TIM3->CCMR1 &= ~TIM_CCMR1_CC1S;
+    TIM3->CCMR1 |=  TIM_CCMR1_CC1S_1;           // CC1S = 10 = TRC
+
+    /* 4. Select ITR1 as trigger (TS = 001 = TIM2 per Table 203) */
+    TIM3->SMCR &= ~TIM_SMCR_TS;
+    TIM3->SMCR |=  (0b001 << TIM_SMCR_TS_Pos);
+
+    /* 5. Slave mode: trigger mode — each TIM2 count triggers a capture */
+    TIM3->SMCR &= ~(TIM_SMCR_SMS | TIM_SMCR_SMS_3);
+    TIM3->SMCR |=  (0b0110 << TIM_SMCR_SMS_Pos);
+
+    /* 6. Enable input capture on CH1 */
+    TIM3->CCER |= TIM_CCER_CC1E;
+
+    /* 7. Enable capture interrupt */
+    TIM3->SR   &= ~TIM_SR_CC1IF;
+    TIM3->DIER |=  TIM_DIER_CC1IE;
+
+    NVIC_SetPriority(TIM3_IRQn, 3);
+    NVIC_EnableIRQ(TIM3_IRQn);
+
+    /* 8. Initialise and start */
+    TIM3->EGR |=  TIM_EGR_UG;
+    TIM3->SR  &= ~TIM_SR_UIF;
+    TIM3->CR1 |=  TIM_CR1_CEN;
+}
+
+void TIM3_IRQHandler(void)
+{
+    if (TIM3->SR & TIM_SR_CC1IF)
+    {
+        TIM3->SR &= ~TIM_SR_CC1IF;
+
+        static uint32_t prev_capture = 0;
+        uint32_t current_capture = TIM3->CCR1;        // read clears flag too
+        pulse_period             = current_capture - prev_capture;
+        prev_capture             = current_capture;
+        last_capture_time        = current_capture;
+    }
+}
+
+/* Input capture velocity — precise at low speed */
+float Encoder_GetVelocityIC_RPM(void)
+{
+    /* if no pulse for >100ms assume stopped */
+    if ((TIM3->CNT - last_capture_time) > (TIM3_FREQ_HZ / 10)) return 0.0f;
+    if (pulse_period == 0) return 0.0f;
+
+    float period_sec = (float)pulse_period / TIM3_FREQ_HZ;
+    float direction  = (TIM2->CR1 & TIM_CR1_DIR) ? -1.0f : 1.0f;
+    return (1.0f / period_sec) * 60.0f / COUNTS_PER_REV * direction;
+}
+
+/* Differentiation velocity — call at fixed control loop rate */
 int32_t Encoder_GetCount(void)
 {
     return (int32_t)TIM2->CNT;
