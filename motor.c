@@ -62,10 +62,31 @@ void setup_TIM1_A8( void ) {
 }
 
 //set duty cycle if valid
-void set_DUTY(uint8_t iDutyCycle) {
+void set_DUTY( uint8_t iDutyCycle ) {
+
     if (iDutyCycle <= 100) {
         uint32_t arr = TIM1->ARR;
         TIM1->CCR1 = (uint32_t)((arr + 1) * iDutyCycle / 100.0);
     }
+}
+
+void set_Motor_Direction( float velocity ){
+
+	if( velocity > 0){
+		//pc3 pc4
+		GPIOA -> BSRR = (DIRECTION_PIN_1 | (DIRECTION_PIN_2 << 16));
+
+	} else {
+		GPIOA -> BSRR = (DIRECTION_PIN_2 | (DIRECTION_PIN_1 << 16));
+
+	}
+
+}
+
+void update_Motor_Velocity( float desired_PWM , float velocity ){
+
+	set_Motor_Direction( velocity );
+	set_DUTY( (uint8_t) desired_PWM );
+
 }
 

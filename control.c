@@ -11,7 +11,6 @@
 #include "control.h"
 #include "stm32l4a6xx.h"
 
-volatile float target_rpm =135.0f;
 
 void GPIOC_C1_C2_Output_Init(void)
 {
@@ -64,8 +63,8 @@ void setup_LOOPTIMERS(void) {
 
 void PI_Init(MotorController_t *ctx, float kp, float ki, float dt)
 {
-    ctx->kp_vel       = kp;
-    ctx->ki_vel       = ki;
+    ctx->kp      = kp;
+    ctx->ki      = ki;
     ctx->integrator_vel = 0.0f;
     ctx->dt           = dt;  // you'll need to add dt to the struct
 }
@@ -76,11 +75,13 @@ float PI_Update(MotorController_t *ctx, float target, float measured)
 
     ctx->integrator_vel += error * ctx->dt;
 
-    float output = (ctx->kp_vel * error) + (ctx->ki_vel * ctx->integrator_vel);
+    float output = (ctx->kp * error) + (ctx->ki * ctx->integrator);
+
 
     // clamp — you'll need output_limit in struct too
-    if      (output >  OUTPUT_LIMIT) output =  OUTPUT_LIMIT;
-    else if (output < -OUTPUT_LIMIT) output = -OUTPUT_LIMIT;
+    if      (output >  ctx->output_limit_high) output =  ctx->output_limit_high;
+    else if (output < ctx->output_limit_low) output = ctx.output_limit_low;
+
 
     return output;
 }
@@ -90,7 +91,7 @@ void PI_Reset(MotorController_t *ctx)
     ctx->integrator_vel = 0.0f;
 }
 
-void TIM5_IRQHandler(void)
+void TIM5_IRQHandler(void) // velocity control loop
 {
     if (TIM5->SR & TIM_SR_UIF)
     {
@@ -98,13 +99,15 @@ void TIM5_IRQHandler(void)
 
         float velocity   = Encoder_GetVelocityRPM();
 
-        float pwm_out = PI_Update(&ctx, target_rpm, velocity);
-        set_DUTY((uint8_t) pwm_out);
-        /* write duty_cycle to PWM */
+        target = (uint8_t) ( ( (float) rawVoltageData / 4095 * 400.0 ) - 200.0 );
+
+        float pwm_out = PI_Update(&ctx, target, velocity);
+
+        set_Motor_Velocity( velocity, pwm_out ); // update motor velocity
     }
 }
 
-void TIM6_DAC_IRQHandler(void) {           // position loop
+void TIM6_DAC_IRQHandler(void) { // position control loop
     TIM6->SR &= ~TIM_SR_UIF;
     GPIOC->ODR ^= 0x4;
     //float pos_error = ctx.position_setpoint - counts_to_degrees(ctx.encoder_count);

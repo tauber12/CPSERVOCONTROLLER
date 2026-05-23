@@ -2,7 +2,8 @@
 
 void SystemClock_Config(void);
 
-MotorController_t ctx = {0};
+MotorController_t ctx_pos = {0};
+MotorController_t ctx_vel = {0};
 
 int main(void)
 {
@@ -15,10 +16,13 @@ int main(void)
   setup_LOOPTIMERS();
   Encoder_Config();
 
-  PI_Init(&ctx, 15.0f, 0.001f, 0.001f);  // 5kHz → dt = 200µs
+  PI_Init(&ctx_pos, 15.0f, 0.001f, 0.001f);  // 5 → dt = 200µs
+  PI_Init(&ctx_vel, 15.0f, 0.001f, 0.001f);  // 5kHz → dt = 200µs
 
   while (1)
   {
+	  ctx_vel.target = target;
+	  HAL_Delay(5);
 
 	  /*for(uint8_t i = 1; i <= 100; i++){
 		  set_DUTY(i);

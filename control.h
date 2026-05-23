@@ -24,24 +24,17 @@ typedef enum {
 
 typedef struct {
 
+
 	 volatile float    dt;            // sample period
-	 volatile float    output_limit;  // clamp value
+	 volatile float    output_limit_high;  // clamp value
+	 volatile float    output_limit_low;  // clamp value
+
     // Setpoints
-    volatile float    position_setpoint;   // degrees
-    volatile float    speed_setpoint;      // RPM
+	 volatile float target;
 
-    // Measurements
-    volatile int32_t  encoder_count;       // raw TIM2 counts
-    volatile float    velocity_rpm;        // computed in velocity ISR
-
-    // PID state — velocity loop
-    volatile float    kp_vel, ki_vel, kd_vel;
-    volatile float    integrator_vel;
-    volatile float    prev_measurement_vel;
-
-    // PID state — position loop
-    volatile float    kp_pos, ki_pos, kd_pos;
-    volatile float    integrator_pos;
+    // PI state
+    volatile float    kp, ki;
+    volatile float    integrator;
     volatile float    prev_measurement_pos;
 
     // Knob input
@@ -55,9 +48,11 @@ typedef struct {
     State_t   state;
     volatile uint8_t  fault_flags;
 
+
 }MotorController_t;
 
-extern MotorController_t ctx;
+extern MotorController_t ctx_pos;
+extern MotorController_t ctx_vel;
 
 void PI_Init(MotorController_t *ctx, float kp, float ki, float dt);
 float PI_Update(MotorController_t *ctx, float target, float measured);
