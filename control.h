@@ -12,8 +12,8 @@
 #include <stdint.h>
 #include "stm32l4xx_hal.h"
 #include "encoder.h"
-
-extern volatile float target_rpm;
+#include "motor.h"
+#include "ADC.h"
 
 typedef enum {
     STATE_1,
@@ -34,11 +34,8 @@ typedef struct {
 
     // PI state
     volatile float    kp, ki;
-    volatile float    integrator;
+    volatile float    integrator_accum;
     volatile float    prev_measurement_pos;
-
-    // Knob input
-    volatile float    knob_degrees;        // AS5600 reading
 
     // ADC
     volatile uint16_t adc_gain;            // PC0 DMA target
@@ -54,8 +51,11 @@ typedef struct {
 extern MotorController_t ctx_pos;
 extern MotorController_t ctx_vel;
 
-void PI_Init(MotorController_t *ctx, float kp, float ki, float dt);
+void setup_LOOPTIMERS(void);
+void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
+		float upper_limit, float lower_limit);
 float PI_Update(MotorController_t *ctx, float target, float measured);
 void  PI_Reset (MotorController_t *ctx);
+
 
 #endif /* SRC_CONTROL_H_ */
