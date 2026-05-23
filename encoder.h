@@ -38,7 +38,7 @@
 #define PPR              7
 #define GEAR_RATIO       150
 #define COUNTS_PER_REV   (PPR * GEAR_RATIO * 4)   // 4,200
-#define CONTROL_LOOP_HZ  1000
+#define CONTROL_LOOP_HZ  100
 
 void    Encoder_Config(void);
 int32_t Encoder_GetCount(void);
@@ -48,4 +48,3 @@ float   Encoder_GetVelocityCPS(void);
 float   Encoder_GetVelocityRPM(void);
 
 #endif /* INC_ENCODER_H_ */
-
