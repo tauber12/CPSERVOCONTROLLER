@@ -24,7 +24,6 @@ typedef enum {
 
 typedef struct {
 
-
 	 volatile float    dt;            // sample period
 	 volatile float    output_limit_high;  // clamp value
 	 volatile float    output_limit_low;  // clamp value
@@ -37,10 +36,6 @@ typedef struct {
     volatile float    integrator_accum;
     volatile float    prev_measurement_pos;
 
-    // ADC
-    volatile uint16_t adc_gain;            // PC0 DMA target
-    volatile uint16_t adc_velocity;        // PC1 DMA target
-
     // System state
     State_t   state;
     volatile uint8_t  fault_flags;
@@ -50,6 +45,16 @@ typedef struct {
 
 extern MotorController_t ctx_pos;
 extern MotorController_t ctx_vel;
+
+//required global variable
+extern volatile float target_velocity;
+
+//for living data tracking
+extern volatile float current_position;
+extern volatile float target_position1;
+extern volatile float target_velocity1;
+extern volatile float pwm_duty1;
+
 
 void setup_LOOPTIMERS(void);
 void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,

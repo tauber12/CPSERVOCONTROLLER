@@ -25,6 +25,28 @@ void GPIOC_C3_C4_Output_Init(void)
     MOTOR_PORT->BSRR = (1U << (3 + 16)) | (1U << (4 + 16));
 }
 
+void GPIOC_C5_C6_Output_Init(void)
+{
+    // 1. Enable GPIOC peripheral clock (may already be enabled)
+    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
+
+    // 2. Set PC5 and PC6 to output mode (MODER = 01)
+    GPIOC->MODER &= ~((3U << (5 * 2)) | (3U << (6 * 2)));
+    GPIOC->MODER |=  ((1U << (5 * 2)) | (1U << (6 * 2)));
+
+    // 3. Push-pull output type
+    GPIOC->OTYPER &= ~((1U << 5) | (1U << 6));
+
+    // 4. Low speed
+    GPIOC->OSPEEDR &= ~((3U << (5 * 2)) | (3U << (6 * 2)));
+
+    // 5. No pull-up / pull-down
+    GPIOC->PUPDR &= ~((3U << (5 * 2)) | (3U << (6 * 2)));
+
+    // 6. Initial state low
+    GPIOC->BSRR = (1U << (5 + 16)) | (1U << (6 + 16));
+}
+
 //change clock to 48MHz from default 4MHz
 void clk_CONFIG_48MHz( void ){
 	// flash latency first??
@@ -79,7 +101,6 @@ void setup_TIM1_A8( void ) {
 
 //set duty cycle if valid
 void set_DUTY( uint8_t iDutyCycle ) {
-
     if (iDutyCycle <= 100) {
         uint32_t arr = TIM1->ARR;
         TIM1->CCR1 = (uint32_t)((arr + 1) * iDutyCycle / 100.0);
@@ -87,13 +108,12 @@ void set_DUTY( uint8_t iDutyCycle ) {
 }
 
 void set_Motor_Direction( bool direction ){
-
 	if( direction ){
+		MOTOR_PORT -> BSRR = (DIRECTION_PIN_2 | (DIRECTION_PIN_1 << 16));
 		//pc3 pc4
-		MOTOR_PORT -> BSRR = (DIRECTION_PIN_1 | (DIRECTION_PIN_2 << 16));
 
 	} else {
-		MOTOR_PORT -> BSRR = (DIRECTION_PIN_2 | (DIRECTION_PIN_1 << 16));
+		MOTOR_PORT -> BSRR = (DIRECTION_PIN_1 | (DIRECTION_PIN_2 << 16));
 
 	}
 }

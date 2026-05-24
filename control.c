@@ -10,6 +10,12 @@
 // tim_isr.c  — control loop ISRs
 #include "control.h"
 
+volatile float target_velocity = 0;
+
+
+volatile float target_velocity1 = 0;
+volatile float current_position = 0;
+volatile float target_position1 = 0;
 
 
 void setup_LOOPTIMERS(void) {
@@ -19,18 +25,20 @@ void setup_LOOPTIMERS(void) {
     RCC->APB1ENR1 |= RCC_APB1ENR1_TIM6EN;
     // enable CCR1 compare interrupt and update interrupt
     //TIM2->DIER |= (TIM_DIER_CC1IE | TIM_DIER_UIE);
-    // set ARR for tim 5,6 for 5khz and
-    TIM5->ARR = 0xBB80;
-    TIM6->ARR = 0xBB80;
+
     TIM5->PSC = 0x0;
-    TIM6->PSC = 0x0;
+    TIM5->ARR = 0x2580; // 5khz
+
+    TIM6->PSC = 9;   // /10 → 4.8 MHz
+    TIM6->ARR = 17700;    // 4,800,000 / 48,000 = 100 Hz
+
     TIM5->DIER |= 0x1;
     TIM6->DIER |= 0x1;
     TIM5->SR &= ~( TIM_SR_UIF);
     TIM6->SR &= ~( TIM_SR_UIF);
     // enable TIM2 IRQ in NVIC
     NVIC->ISER[1] |= (1 << (TIM5_IRQn & 0x1F));
-    //NVIC->ISER[1] |= (1 << (TIM6_DAC_IRQn & 0x1F));
+    NVIC->ISER[1] |= (1 << (TIM6_DAC_IRQn & 0x1F));
     // global IRQ enable
     __enable_irq();
     // start TIM2 CR1
@@ -51,14 +59,17 @@ void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
 
 float PI_Update(MotorController_t *ctx, float target, float measured)
 {
-    float error = target - measured;
+	 float raw_error = target - measured;
+	 float error = (raw_error > -1.5f && raw_error < 1.5f) ? 0.0f : raw_error;
+    //error1 = error;
 
     ctx->integrator_accum += error * ctx->dt;
+    //intaccum1 =  ctx->integrator_accum;
 
-    if (ctx->integrator_accum > 10) {
-   	 ctx->integrator_accum = 10;
-    } else if (ctx->integrator_accum < -10) {
-   	 ctx->integrator_accum = -10;
+    if (ctx->integrator_accum > 250) {
+   	 ctx->integrator_accum = 250;
+    } else if (ctx->integrator_accum < -250) {
+   	 ctx->integrator_accum = -250;
     }
 
     float output = (ctx->kp * error) + (ctx->ki * ctx->integrator_accum);
@@ -79,23 +90,42 @@ void PI_Reset(MotorController_t *ctx)
 
 void TIM5_IRQHandler(void) // velocity control loop
 {
+	 GPIOC -> ODR ^= 0x20;
     if (TIM5->SR & TIM_SR_UIF)
     {
         TIM5->SR &= ~TIM_SR_UIF;
 
         float velocity   = Encoder_GetVelocityRPM();
+        //velocity1 = velocity;
+        //float target = ((float)rawVoltageData / 4095.0f) * 400.0f - 200.0f;
+        //target1 = target;
 
-        float target = ((float)rawVoltageData / 4095.0f) * 400.0f - 200.0f;
-
-        float pwm_duty = PI_Update(&ctx_vel, target, velocity);
+        float pwm_duty = PI_Update(&ctx_vel, target_velocity, velocity);
+        //pwm_duty1 = pwm_duty;
 
         update_Motor_Velocity( pwm_duty ); // update motor velocity
     }
 }
 
 void TIM6_DAC_IRQHandler(void) { // position control loop
-    TIM6->SR &= ~TIM_SR_UIF;
-    GPIOC->ODR ^= 0x4;
-    //float pos_error = ctx.position_setpoint - counts_to_degrees(ctx.encoder_count);
-    //ctx.speed_setpoint = CLAMP(pid_update_pos(pos_error), -MAX_RPM, MAX_RPM);
+
+	 GPIOC->ODR ^= 0x40;
+    if (TIM6->SR & TIM_SR_UIF)
+    {
+
+   	 TIM6->SR &= ~TIM_SR_UIF;
+
+		 float position = Encoder_GetDegrees(); // measured position
+		 current_position = position;
+
+		 float target_position = ((float)rawVoltageData / 4095.0f) * 360.0f - 180.0f; // target position
+		 target_position1 = target_position;
+
+		 target_velocity = PI_Update(&ctx_pos, target_position, position);
+		 target_velocity1 = target_velocity;
+
+
+    }
 }
+
+

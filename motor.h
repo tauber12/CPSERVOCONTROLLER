@@ -15,11 +15,10 @@
 #define DIRECTION_PIN_1 GPIO_PIN_3
 #define DIRECTION_PIN_2 GPIO_PIN_4
 
-
-
 typedef int bool;
 
 void GPIOC_C3_C4_Output_Init(void);
+void GPIOC_C5_C6_Output_Init(void);
 void clk_CONFIG_48MHz( void );
 void setup_TIM1_A8( void );
 void set_DUTY(uint8_t iDutyCycle);
