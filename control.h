@@ -16,11 +16,13 @@
 #include "ADC.h"
 
 typedef enum {
-    STATE_1,
-    STATE_2,
-    STATE_3,
-    STATE_4_
-} State_t;
+    STATE_IDLE,
+    STATE_POSITION_CONTROL,
+	 STATE_VELOCITY_CONTROL,
+	 STATE_OPEN_LOOP,
+	 STATE_STEP_TEST,
+	 STATE_HOLD
+}State_t;
 
 typedef struct {
 
@@ -34,10 +36,8 @@ typedef struct {
     // PI state
     volatile float    kp, ki;
     volatile float    integrator_accum;
-    volatile float    prev_measurement_pos;
 
-    // System state
-    State_t   state;
+    // faults
     volatile uint8_t  fault_flags;
 
 
@@ -61,6 +61,7 @@ void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
 		float upper_limit, float lower_limit);
 float PI_Update(MotorController_t *ctx, float target, float measured);
 void  PI_Reset (MotorController_t *ctx);
+void setup_PBSWEXTI( void );
 
 
 #endif /* SRC_CONTROL_H_ */
