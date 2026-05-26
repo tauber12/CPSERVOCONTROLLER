@@ -49,7 +49,7 @@ void ADC_init(void) {
     ADC1->ISR |= (ADC_ISR_ADRDY);               // set to clr ADC Ready flag
     // configure ADC sampling & sequencing
     ADC1->SQR1  |= (2 << ADC_SQR1_SQ1_Pos);     // sequence = 1 conv., ch 2
-    ADC1->SMPR1 |= (1 << ADC_SMPR1_SMP2_Pos);   // ch 2 sample time = 6.5 clocks
+    ADC1->SMPR1 |= (4 << ADC_SMPR1_SMP2_Pos);   // ch 2 sample time = 47.5 clocks
     ADC1->CFGR  &= ~( ADC_CFGR_CONT  |          // single conversion mode
                       ADC_CFGR_EXTEN |          // h/w trig disabled for s/w trig
                       ADC_CFGR_RES   );         // 12-bit resolution
@@ -65,9 +65,16 @@ void ADC_init(void) {
     ADC1->CR |= ADC_CR_ADSTART;                 // start 1st conversion
 }
 
+void ADC_StartConversion(void)
+{
+    if (!(ADC1->CR & ADC_CR_ADSTART))
+    {
+        ADC1->CR |= ADC_CR_ADSTART;
+    }
+}
+
 void ADC1_2_IRQHandler(void) {
     if (ADC1->ISR & ADC_ISR_EOC) {
         rawVoltageData = ADC1->DR;              // read DR, clears EOC flag
-        ADC1->CR |= ADC_CR_ADSTART;             // start next conversion
     }
 }
