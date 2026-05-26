@@ -10,14 +10,15 @@
 // tim_isr.c  — control loop ISRs
 #include "control.h"
 
-volatile float target_velocity = 0;
+volatile float pos_controller_output_velocity = 0;
+volatile uint8_t tracking_toggle_request = 0;
 
-
+// Variables for readout, testing only
 volatile float target_velocity1 = 0;
 volatile float current_position = 0;
 volatile float target_position1 = 0;
 
-State_t state = STATE_IDLE;
+Controller_State state = STATE_POSITION_CONTROL;
 
 void setup_LOOPTIMERS(void) {
 
@@ -91,74 +92,81 @@ void PI_Reset(MotorController_t *ctx)
     ctx->integrator_accum = 0.0f;
 }
 
-/*void TIM5_IRQHandler(void) // velocity control loop
+void Control_EnterTracking(void)
 {
-	 GPIOC -> ODR ^= 0x20;
-    if (TIM5->SR & TIM_SR_UIF)
+    float measured_position = Encoder_GetDegrees();
+
+    PI_Reset(&ctx_pos);
+    PI_Reset(&ctx_vel);
+
+    current_position = measured_position;
+
+    pos_controller_output_velocity = 0.0f;
+    target_velocity1 = 0.0f;
+
+    /*
+     * Optional debug variable.
+     * This does not fully hold the target unless your TIM6 ISR uses it.
+     */
+    target_position1 = measured_position;
+
+    update_Motor_Velocity(0.0f);
+
+    state = STATE_POSITION_CONTROL;
+}
+
+void Control_ExitTracking(void)
+{
+    state = STATE_DISABLED;
+
+    PI_Reset(&ctx_pos);
+    PI_Reset(&ctx_vel);
+
+    pos_controller_output_velocity = 0.0f;
+    target_velocity1 = 0.0f;
+
+    update_Motor_Velocity(0.0f);
+}
+
+void Control_ToggleTracking(void)
+{
+    if (state == STATE_DISABLED)
     {
-        TIM5->SR &= ~TIM_SR_UIF;
-
-        float velocity   = Encoder_GetVelocityRPM();
-        //velocity1 = velocity;
-        //float target = ((float)rawVoltageData / 4095.0f) * 400.0f - 200.0f;
-        //target1 = target;
-
-        float pwm_duty = PI_Update(&ctx_vel, target_velocity, velocity);
-        //pwm_duty1 = pwm_duty;
-
-        update_Motor_Velocity( pwm_duty ); // update motor velocity
+        Control_EnterTracking();
     }
-}*/
-
-/*void TIM6_DAC_IRQHandler(void) { // position control loop
-
-	 GPIOC->ODR ^= 0x40;
-    if (TIM6->SR & TIM_SR_UIF)
+    else if (state == STATE_POSITION_CONTROL)
     {
-
-   	 TIM6->SR &= ~TIM_SR_UIF;
-
-		 float position = Encoder_GetDegrees(); // measured position
-		 current_position = position;
-
-		 float target_position = ((float)rawVoltageData / 4095.0f) * 360.0f - 180.0f; // target position
-		 target_position1 = target_position;
-
-		 target_velocity = PI_Update(&ctx_pos, target_position, position);
-		 target_velocity1 = target_velocity;
-
-
+        Control_ExitTracking();
     }
-}*/
+}
 
 void TIM5_IRQHandler(void) // velocity control loop
 {
 	 GPIOC -> ODR ^= 0x20;
     if ( TIM5->SR & TIM_SR_UIF ) {
        TIM5->SR &= ~TIM_SR_UIF;
-    	 switch(state){  // behavior of loop dependent on current state
-    	 	 case STATE_IDLE:
-    	 	 case STATE_IDLE:
-    	 	 case STATE_POSITION_CONTROL:
 
-    	       float velocity   = Encoder_GetVelocityRPM();
-    	       float pwm_duty = PI_Update(&ctx_vel, target_velocity, velocity);
-    	       update_Motor_Velocity( pwm_duty ); // update motor velocity
+       // Check if controller enabled
+       if (state == STATE_DISABLED || state == STATE_FAULT)
+       {
+           pos_controller_output_velocity = 0.0f;
+           update_Motor_Velocity(0.0f);
+           return;
+       }
 
-    	 	 case STATE_VELOCITY_CONTROL:
+       // Control Loop
+		 float measured_velocity   = Encoder_GetVelocityRPM();
+		 float target_velocity;
+			 if (state == STATE_POSITION_CONTROL) {
+				target_velocity = pos_controller_output_velocity;
+			 } else {
+				target_velocity = ((float)rawVoltageData / 4095.0f) * 200.0f - 100.0f;
+			 }
+		 float pwm_duty = PI_Update(&ctx_vel, target_velocity, measured_velocity);
+		 update_Motor_Velocity( pwm_duty ); // update motor velocity
 
-    	       float velocity   = Encoder_GetVelocityRPM();
-   			 float target_velocity = ((float)rawVoltageData / 4095.0f) * 200.0f - 100.0f;
-    	       float pwm_duty = PI_Update(&ctx_vel, target_velocity, velocity);
-    	       update_Motor_Velocity( pwm_duty ); // update motor velocity
-
-    	 	 case STATE_OPEN_LOOP:
-    	 	 case STATE_STEP_TEST:
-    	 	 case STATE_HOLD:
-    	 	 default:
-
-    	 }
-
+		 // Start conversion for reading velocity setpoint
+		 ADC_StartConversion();
     }
 }
 
@@ -167,106 +175,23 @@ void TIM6_DAC_IRQHandler(void) { // position control loop
 	 GPIOC->ODR ^= 0x40;
     if ( TIM6->SR & TIM_SR_UIF ) {
 		 TIM6->SR &= ~TIM_SR_UIF; // clear interrupt flag
-
-   	 switch(state){  // behavior of loop dependent on current state
-   	 	 case STATE_IDLE:
-   	 	 case STATE_IDLE:
-   	 	 case STATE_POSITION_CONTROL:
-
-   			 float position = Encoder_GetDegrees(); // measured position
-   			 current_position = position;
+       // Handle Tracking Toggle request
+       if (tracking_toggle_request)
+       {
+           tracking_toggle_request = 0;
+           Control_ToggleTracking();
+       }
+       // Control loop
+		 if (state == STATE_POSITION_CONTROL) {
+   			 float measured_position = Encoder_GetDegrees();
+   			 current_position = measured_position;
 
    			 float target_position = ((float)rawVoltageData / 4095.0f) * 360.0f - 180.0f; // target position
    			 target_position1 = target_position;
 
-   			 target_velocity = PI_Update(&ctx_pos, target_position, position);
-   			 target_velocity1 = target_velocity;
-
-   	 	 case STATE_VELOCITY_CONTROL:
-
-   	 		 // position loop not used for velocity control
-
-   	 	 case STATE_OPEN_LOOP:
-
-
-   	 	 case STATE_STEP_TEST:
-   	 	 case STATE_HOLD:
-   	 	 default:
-
-   	 }
-
-
-
-
-
-
-    }
+   			 pos_controller_output_velocity = PI_Update(&ctx_pos, target_position, measured_position);
+   			 target_velocity1 = pos_controller_output_velocity;
+		 }
+   }
 }
-
-/*-----------------------------------------------------------------------------
- * function : setup_PBSWEXTI( )
- * INs      : none
- * OUTs     : none
- * action   : enables GPIOA clock; configures PA3 as input with pull-down;
- *            routes EXTI3 to port A via SYSCFG; enables rising-edge trigger,
- *            disables falling-edge; unmasks EXTI3 interrupt; enables EXTI3
- *            in NVIC and globally enables IRQs
- * authors  : Alex Tauber
- * version  : 0.1
- * date     : 260424
- * usage    :
- *----------------------------------------------------------------------------*/
-void setup_PBSWEXTI( void ) {
-
-    // enable GPIOA clock
-    RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
-    // clear PA3 mode bits — input mode
-    GPIOA->MODER &= ~(GPIO_MODER_MODE3);
-    // clear PA3 pull bits then set pull-down
-    GPIOA->PUPDR &= ~(GPIO_PUPDR_PUPD3);
-    GPIOA->PUPDR |=  (GPIO_PUPDR_PUPD3_1);
-
-    // route EXTI3 to port A via SYSCFG
-    SYSCFG->EXTICR[0] &= ~(SYSCFG_EXTICR1_EXTI3);
-    SYSCFG->EXTICR[0] |=  (SYSCFG_EXTICR1_EXTI3_PA);
-
-    // enable rising edge trigger
-    EXTI->RTSR1 |=  (1 << 3);
-    // disable falling edge trigger
-    EXTI->FTSR1 &= ~(1 << 3);
-    // unmask EXTI3 interrupt line
-    EXTI->IMR1  |=  (1 << 3);
-
-    // enable EXTI3 in NVIC and globally enable interrupts
-    NVIC_EnableIRQ(EXTI3_IRQn);
-
-    __enable_irq();
-}
-
-/*-----------------------------------------------------------------------------
- * function : EXTI3_IRQHandler( )
- * INs      : none
- * OUTs     : none
- * action   : clears EXTI3 pending flag; state transitions occur in this irq handler
- *
- * authors  : Alex Tauber
- * version  : 0.1
- * date     : 260424
- * usage    : ISR — called automatically by NVIC on PA3 rising edge
- *----------------------------------------------------------------------------*/
-void EXTI3_IRQHandler( void ) {
-
-    if (EXTI->PR1 & (1 << 3)) {
-        // clear pending flag
-        EXTI->PR1 |= (1 << 3);
-
-        /* need to check other condition before changing state
-         ( assuming mode selection happens on the TFT display with user input
-          - likely need to check current position on screen
-         */
-
-    }
-
-}
-
 
