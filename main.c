@@ -27,8 +27,8 @@ int main(void)
   HAL_Init();
   SystemClock_Config();
 
-  PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, 100, -100);  // 5kHz
-  PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, 200, -200);  // 500Hz
+  PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);  // 5kHz
+  PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);  // 500Hz
 
   GPIOC_C3_C4_Output_Init();
   GPIOC_C5_C6_Output_Init();
