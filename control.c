@@ -17,8 +17,10 @@ volatile uint8_t tracking_toggle_request = 0;
 volatile float target_velocity1 = 0;
 volatile float current_position = 0;
 volatile float target_position1 = 0;
+volatile float measured_velocity1 = 0;
 
-Controller_State state = STATE_POSITION_CONTROL;
+Controller_State state = STATE_VELOCITY_CONTROL;
+Controller_State previous_state = STATE_VELOCITY_CONTROL;
 
 void setup_LOOPTIMERS(void) {
 
@@ -100,23 +102,19 @@ void Control_EnterTracking(void)
     PI_Reset(&ctx_vel);
 
     current_position = measured_position;
-
     pos_controller_output_velocity = 0.0f;
     target_velocity1 = 0.0f;
-
-    /*
-     * Optional debug variable.
-     * This does not fully hold the target unless your TIM6 ISR uses it.
-     */
     target_position1 = measured_position;
 
     update_Motor_Velocity(0.0f);
 
-    state = STATE_POSITION_CONTROL;
+    state = previous_state;  // restore whichever mode was active before
 }
 
 void Control_ExitTracking(void)
 {
+    previous_state = state;  // save current mode before disabling
+
     state = STATE_DISABLED;
 
     PI_Reset(&ctx_pos);
@@ -134,7 +132,7 @@ void Control_ToggleTracking(void)
     {
         Control_EnterTracking();
     }
-    else if (state == STATE_POSITION_CONTROL)
+    else if (state == STATE_POSITION_CONTROL || state == STATE_VELOCITY_CONTROL)
     {
         Control_ExitTracking();
     }
@@ -145,6 +143,8 @@ void TIM5_IRQHandler(void) // velocity control loop
 	 GPIOC -> ODR ^= 0x20;
     if ( TIM5->SR & TIM_SR_UIF ) {
        TIM5->SR &= ~TIM_SR_UIF;
+		 // Start conversion for reading velocity setpoint
+		 ADC_StartConversion();
 
        // Check if controller enabled
        if (state == STATE_DISABLED || state == STATE_FAULT)
@@ -156,17 +156,17 @@ void TIM5_IRQHandler(void) // velocity control loop
 
        // Control Loop
 		 float measured_velocity   = Encoder_GetVelocityRPM();
+		 measured_velocity1 = measured_velocity;
 		 float target_velocity;
 			 if (state == STATE_POSITION_CONTROL) {
 				target_velocity = pos_controller_output_velocity;
 			 } else {
 				target_velocity = ((float)rawVoltageData / 4095.0f) * 200.0f - 100.0f;
 			 }
+			 target_velocity1 = target_velocity;
 		 float pwm_duty = PI_Update(&ctx_vel, target_velocity, measured_velocity);
 		 update_Motor_Velocity( pwm_duty ); // update motor velocity
 
-		 // Start conversion for reading velocity setpoint
-		 ADC_StartConversion();
     }
 }
 
