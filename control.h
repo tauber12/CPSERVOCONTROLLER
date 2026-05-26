@@ -16,13 +16,11 @@
 #include "ADC.h"
 
 typedef enum {
-    STATE_IDLE,
+    STATE_DISABLED = 0,
     STATE_POSITION_CONTROL,
 	 STATE_VELOCITY_CONTROL,
-	 STATE_OPEN_LOOP,
-	 STATE_STEP_TEST,
-	 STATE_HOLD
-}State_t;
+	 STATE_FAULT
+}Controller_State;
 
 typedef struct {
 
@@ -47,7 +45,9 @@ extern MotorController_t ctx_pos;
 extern MotorController_t ctx_vel;
 
 //required global variable
-extern volatile float target_velocity;
+extern volatile float pos_controller_output_velocity;
+extern volatile uint8_t tracking_toggle_request;
+
 
 //for living data tracking
 extern volatile float current_position;
@@ -61,7 +61,9 @@ void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
 		float upper_limit, float lower_limit);
 float PI_Update(MotorController_t *ctx, float target, float measured);
 void  PI_Reset (MotorController_t *ctx);
-void setup_PBSWEXTI( void );
+void Control_EnterTracking(void);
+void Control_ExitTracking(void);
+void Control_ToggleTracking(void);
 
 
 #endif /* SRC_CONTROL_H_ */
