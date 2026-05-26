@@ -30,6 +30,7 @@ extern "C" {
 #include "stm32l4xx_hal.h"
 #include "control.h"
 #include "encoder.h"
+#include "HMI.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
