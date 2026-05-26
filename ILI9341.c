@@ -23,6 +23,7 @@
  * Header format adapted from [Code Appendix by Kevin Vo] pg 5
  */
 
+#include "ILI9341.h"
 /* -----------------------------------------------------------------------------
  * function : TFT_SPI_init()
  * INs      : none
