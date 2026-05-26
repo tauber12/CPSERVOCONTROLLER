@@ -6,16 +6,18 @@ MotorController_t ctx_pos = {0};
 MotorController_t ctx_vel = {0};
 
 void interrupt_Priorities( void ){
-	
-	
+
+
 	NVIC_SetPriority(EXTI0_IRQn,       0);  // encoder edge timestamp (T-method)
-	NVIC_SetPriority(TIM2_IRQn,        0);  // encoder HW counter (if overflow IRQ added)
-	
+
 	NVIC_SetPriority(TIM5_IRQn,        1);  // velocity loop  — 5 kHz
 	NVIC_SetPriority(TIM6_DAC_IRQn,    2);  // position loop  — 500 Hz
 
 	NVIC_SetPriority(TIM3_IRQn,        3);  // µs timebase
 	NVIC_SetPriority(ADC1_2_IRQn,      4);  // ADC conversion complete
+
+
+   NVIC_SetPriority(TIM7_IRQn,        5);  // Button Poll
 
 }
 
@@ -31,6 +33,8 @@ int main(void)
   GPIOC_C3_C4_Output_Init();
   GPIOC_C5_C6_Output_Init();
   setup_TIM1_A8();
+  Button_Init();
+  setup_TIM7_ButtonPoll();
 
   Encoder_Config();        // EXTI0 configured here
   ADC_init();
@@ -39,7 +43,11 @@ int main(void)
 
   while (1)
   {
-
+	  // Menu Navigation handled here
+     if (Button_WasPressed())
+     {
+         tracking_toggle_request = 1;
+     }
 
   }
 
