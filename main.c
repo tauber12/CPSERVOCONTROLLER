@@ -37,6 +37,7 @@ int main(void)
   setup_TIM7_ButtonPoll();
 
   Encoder_Config();        // EXTI0 configured here
+  HMI_Encoder_Config();
   ADC_init();
   interrupt_Priorities();  // set priorities after all peripherals initialized
   setup_LOOPTIMERS();      // enable interrupts last
