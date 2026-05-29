@@ -22,22 +22,17 @@ typedef enum {
 	 STATE_FAULT
 }Controller_State;
 
+extern volatile Controller_State state;
+
 typedef struct {
 
 	 volatile float    dt;            // sample period
 	 volatile float    output_limit_high;  // clamp value
 	 volatile float    output_limit_low;  // clamp value
 
-    // Setpoints
-	 volatile float target;
-
     // PI state
     volatile float    kp, ki;
     volatile float    integrator_accum;
-
-    // faults
-    volatile uint8_t  fault_flags;
-
 
 }MotorController_t;
 
@@ -57,6 +52,7 @@ extern volatile float pwm_duty1;
 
 
 void setup_LOOPTIMERS(void);
+void Change_Control_Loop_Speed ( float positionLoop_kHz, float velocityLoop_kHz );
 void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
 		float upper_limit, float lower_limit);
 float PI_Update(MotorController_t *ctx, float target, float measured);

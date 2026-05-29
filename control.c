@@ -12,6 +12,8 @@
 
 volatile float pos_controller_output_velocity = 0;
 volatile uint8_t tracking_toggle_request = 0;
+uint32_t CONTROL_LOOP_HZ = 5000U;
+
 
 // Variables for readout, testing only
 volatile float target_velocity1 = 0;
@@ -19,8 +21,8 @@ volatile float current_position = 0;
 volatile float target_position1 = 0;
 volatile float measured_velocity1 = 0;
 
-Controller_State state = STATE_VELOCITY_CONTROL;
-Controller_State previous_state = STATE_VELOCITY_CONTROL;
+volatile Controller_State state = STATE_VELOCITY_CONTROL;
+volatile Controller_State previous_state = STATE_VELOCITY_CONTROL;
 
 void setup_LOOPTIMERS(void) {
 
@@ -53,24 +55,31 @@ void setup_LOOPTIMERS(void) {
 
 }
 
+void Change_Control_Loop_Speed ( float positionLoop_kHz, float velocityLoop_kHz ) {
+
+	CONTROL_LOOP_HZ = (uint32_t) velocityLoop_kHz;
+   TIM5->ARR = (uint32_t) 48000000.0f / velocityLoop_kHz; // initialize as 5kHz (48,000,000 / 5000 = 0x2580)
+   TIM6->PSC = 9;   // /10 → 4.8 MHz
+   TIM6->ARR = (uint32_t) 4800000.0f / positionLoop_kHz;    // initialize as 500Hz (4,800,000 / 500 = 0x2580)
+
+}
+
 void PI_Init(MotorController_t *ctx, float kp, float ki, float dt,
 		float lower_limit, float upper_limit) {
-    ctx->kp      = kp;
-    ctx->ki      = ki;
-    ctx->integrator_accum = 0.0f;
-    ctx->dt           = dt;  // you'll need to add dt to the struct
-    ctx->output_limit_high = upper_limit;
-    ctx->output_limit_low = lower_limit;
+     ctx->kp      = kp;
+     ctx->ki      = ki;
+     ctx->integrator_accum = 0.0f;
+     ctx->dt           = dt;  // you'll need to add dt to the struct
+     ctx->output_limit_high = upper_limit;
+     ctx->output_limit_low = lower_limit;
 }
 
 float PI_Update(MotorController_t *ctx, float target, float measured)
 {
 	 float raw_error = target - measured;
 	 float error = (raw_error > -1.5f && raw_error < 1.5f) ? 0.0f : raw_error;
-    //error1 = error;
 
     ctx->integrator_accum += error * ctx->dt;
-    //intaccum1 =  ctx->integrator_accum;
 
     if (ctx->integrator_accum > 250) {
    	 ctx->integrator_accum = 250;

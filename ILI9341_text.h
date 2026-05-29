@@ -62,6 +62,17 @@ void ILI9341_fillRect(uint16_t x, uint16_t y,
 // Fill the entire screen with a solid color
 void ILI9341_fillScreen(uint16_t color);
 
+// Set display rotation and update runtime clipping dimensions
+// rotation 0: portrait 240x320
+// rotation 1: landscape 320x240
+// rotation 2: inverted portrait 240x320
+// rotation 3: inverted landscape 320x240
+void ILI9341_setRotation(uint8_t rotation);
+
+// Return the current runtime dimensions after rotation
+uint16_t ILI9341_getWidth(void);
+uint16_t ILI9341_getHeight(void);
+
 // Draw a single scaled ASCII character
 // scale=1: 6x7 pixels per char (5 wide + 1 gap)
 // scale=2: 12x14 pixels per char, etc.

@@ -21,37 +21,142 @@ void interrupt_Priorities( void ){
 
 }
 
+typedef enum {
+    CLR_BLACK = 0,
+    CLR_WHITE,
+    CLR_RED,
+    CLR_GREEN,
+    CLR_BLUE,
+    CLR_YELLOW,
+    CLR_CYAN,
+    CLR_MAGENTA,
+    CLR_ORANGE,
+    CLR_GRAY,
+    CLR_COUNT
+} ColorIndex_t;
+
+const uint16_t colors[CLR_COUNT] = {
+    [CLR_BLACK]   = COLOR_BLACK,
+    [CLR_WHITE]   = COLOR_WHITE,
+    [CLR_RED]     = COLOR_RED,
+    [CLR_GREEN]   = COLOR_GREEN,
+    [CLR_BLUE]    = COLOR_BLUE,
+    [CLR_YELLOW]  = COLOR_YELLOW,
+    [CLR_CYAN]    = COLOR_CYAN,
+    [CLR_MAGENTA] = COLOR_MAGENTA,
+    [CLR_ORANGE]  = COLOR_ORANGE,
+    [CLR_GRAY]    = COLOR_GRAY,
+};
+
+
 int main(void)
 {
 
   HAL_Init();
   SystemClock_Config();
-
   PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);  // 5kHz
   PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);  // 500Hz
-
   GPIOC_C3_C4_Output_Init();
   GPIOC_C5_C6_Output_Init();
   setup_TIM1_A8();
   Button_Init();
   setup_TIM7_ButtonPoll();
-
   Encoder_Config();        // EXTI0 configured here
   ADC_init();
   interrupt_Priorities();  // set priorities after all peripherals initialized
   setup_LOOPTIMERS();      // enable interrupts last
+  TFT_SPI_init();
+  ILI9341_init();
+  HAL_Delay(200);
 
+
+/*#define NUM_RECTS 5
+#define RECT_W    30
+#define RECT_H    20
+
+typedef struct {
+    int16_t x, y;      // current position
+    int16_t dx, dy;    // velocity (+1 or -1)
+    uint16_t color;
+} Rect_t;
+
+void rectangleAnimation(void)
+{
+    Rect_t rects[NUM_RECTS] = {
+        { 10,  20,  2,  1, COLOR_RED     },
+        { 80,  60, -2,  2, COLOR_CYAN    },
+        { 150, 100,  1, -2, COLOR_YELLOW  },
+        { 50,  200, -1,  1, COLOR_MAGENTA },
+        { 200, 280,  2, -1, COLOR_ORANGE  },
+    };
+
+    // erase positions — track previous x/y to clear only dirty region
+    int16_t prev_x[NUM_RECTS];
+    int16_t prev_y[NUM_RECTS];
+
+    // init previous positions
+    for (uint8_t i = 0; i < NUM_RECTS; i++) {
+        prev_x[i] = rects[i].x;
+        prev_y[i] = rects[i].y;
+    }
+
+    ILI9341_fillScreen(COLOR_BLACK);
+
+    for (uint16_t frame = 0; frame < 2000; frame++)
+    {
+        for (uint8_t i = 0; i < NUM_RECTS; i++)
+        {
+            // erase previous position
+            ILI9341_fillRect(prev_x[i], prev_y[i], RECT_W, RECT_H, COLOR_BLACK);
+
+            // update position
+            rects[i].x += rects[i].dx;
+            rects[i].y += rects[i].dy;
+
+            // bounce off walls — change color on bounce like DVD logo
+            if (rects[i].x <= 0) {
+                rects[i].x  = 0;
+                rects[i].dx = -rects[i].dx;
+                rects[i].color = colors[(i + frame) % CLR_COUNT];
+            }
+            if (rects[i].x >= ILI9341_WIDTH - RECT_W) {
+                rects[i].x  = ILI9341_WIDTH - RECT_W;
+                rects[i].dx = -rects[i].dx;
+                rects[i].color = colors[(i + frame + 1) % CLR_COUNT];
+            }
+            if (rects[i].y <= 0) {
+                rects[i].y  = 0;
+                rects[i].dy = -rects[i].dy;
+                rects[i].color = colors[(i + frame + 2) % CLR_COUNT];
+            }
+            if (rects[i].y >= ILI9341_HEIGHT - RECT_H) {
+                rects[i].y  = ILI9341_HEIGHT - RECT_H;
+                rects[i].dy = -rects[i].dy;
+                rects[i].color = colors[(i + frame + 3) % CLR_COUNT];
+            }
+
+            // draw at new position
+            ILI9341_fillRect(rects[i].x, rects[i].y, RECT_W, RECT_H, rects[i].color);
+
+            // save for next erase
+            prev_x[i] = rects[i].x;
+            prev_y[i] = rects[i].y;
+        }
+
+        HAL_Delay(8);  // ~120 frames/sec effective, tune to taste
+    }
+}*/
+
+  ControlLoopDisplay_Draw();
   while (1)
   {
-	  // Menu Navigation handled here
-     if (Button_WasPressed())
-     {
-         tracking_toggle_request = 1;
-     }
+	  //rectangleAnimation();
 
   }
 
 }
+
+
 
 void SystemClock_Config(void)
 {
