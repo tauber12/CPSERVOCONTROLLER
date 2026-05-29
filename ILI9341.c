@@ -1,29 +1,42 @@
 /*
  *******************************************************************************
  * @file           : ILI9341.c
- * @brief          : X
+ * @brief          : SPI driver for ILI9341 TFT display
  * project         : EE 329 S'26 AX
  * authors         : joeym
- * version         : 0.1
- * date            : May 25, 2026
+ * version         : 0.2
+ * date            : May 28, 2026
  * compiler        : STM32CubeIDE v.1.19.0 Build: 14980_20230301_1550 (UTC)
  * target          : NUCLEO-L4A6ZG
  * clocks          : 48 MHz MSI to AHB2
  * @attention      : (c) 2026 STMicroelectronics.  All rights reserved.
  *******************************************************************************
- * Description: X
+ * Description:
+ *   Register-level SPI1 driver for the ILI9341 240x320 TFT display.
+ *   SPI clock = 48 MHz / 4 = 12 MHz (BR[2:0] = 0b001).
+ *
+ * Pins:
+ *   PA5 = SPI1_SCK
+ *   PA6 = SPI1_MISO  (optional / unused for write-only operation)
+ *   PA7 = SPI1_MOSI
+ *   PB0 = TFT_CS     (active low, software controlled)
+ *   PB1 = TFT_DC     (low = command, high = data)
+ *   PB2 = TFT_RST    (active low hardware reset)
  *
  *******************************************************************************
  * Version History
  *  Ver.|   Date   |  Description
  *  ---------------------------------------------------------------------------
- *      |          | 
+ *  0.1 | 05-25-26 | Initial implementation
+ *  0.2 | 05-28-26 | Fix SPI RX FIFO / OVR flag accumulation in SPI1_write8
+ *                 | Call ILI9341_reset() at top of ILI9341_init()
+ *                 | Clean up stale comments
  *******************************************************************************
- *
- * Header format adapted from [Code Appendix by Kevin Vo] pg 5
  */
 
 #include "ILI9341.h"
+#include "ILI9341_text.h"
+
 /* -----------------------------------------------------------------------------
  * function : TFT_SPI_init()
  * INs      : none
@@ -115,9 +128,9 @@ void TFT_SPI_init(void)
                       GPIO_PUPDR_PUPD2);
 
     // default TFT control pin states
-    GPIOB->ODR |=  GPIO_ODR_OD0;   // CS high, inactive
-    GPIOB->ODR |=  GPIO_ODR_OD1;   // DC high, data mode
-    GPIOB->ODR |=  GPIO_ODR_OD2;   // RST high, not reset
+    GPIOB->ODR |=  GPIO_ODR_OD0;   // CS  high (inactive)
+    GPIOB->ODR |=  GPIO_ODR_OD1;   // DC  high (data mode)
+    GPIOB->ODR |=  GPIO_ODR_OD2;   // RST high (not in reset)
 
     /* -------------------------------------------------------------------------
      * Configure SPI1
@@ -127,78 +140,115 @@ void TFT_SPI_init(void)
     SPI1->CR1 &= ~(SPI_CR1_SPE);
 
     // CR1 configuration
-    SPI1->CR1 &= ~(SPI_CR1_RXONLY);              // transmit/receive mode
+    SPI1->CR1 &= ~(SPI_CR1_RXONLY);              // full-duplex
     SPI1->CR1 &= ~(SPI_CR1_LSBFIRST);            // MSB first
     SPI1->CR1 &= ~(SPI_CR1_CPOL | SPI_CR1_CPHA); // SPI mode 0
-    SPI1->CR1 |=  SPI_CR1_MSTR;                  // MCU is SPI master
+    SPI1->CR1 |=  SPI_CR1_MSTR;                  // master mode
 
-    // software slave management because CS is controlled manually on PB0
+    // software slave management — CS driven manually on PB0
     SPI1->CR1 |= SPI_CR1_SSM;
     SPI1->CR1 |= SPI_CR1_SSI;
 
-    // baud rate
-    // 48 MHz / 4 = 12 MHz SPI clock
+    // baud rate: 48 MHz / 4 = 12 MHz  (BR[2:0] = 0b001)
     SPI1->CR1 &= ~(SPI_CR1_BR);
     SPI1->CR1 |=  SPI_CR1_BR_0;
 
     // CR2 configuration
-    SPI1->CR2 &= ~(SPI_CR2_TXEIE | SPI_CR2_RXNEIE); // disable SPI interrupts
+    SPI1->CR2 &= ~(SPI_CR2_TXEIE | SPI_CR2_RXNEIE); // no SPI interrupts
     SPI1->CR2 &= ~(SPI_CR2_FRF);                    // Motorola frame format
     SPI1->CR2 &= ~(SPI_CR2_NSSP);                   // no hardware NSS pulse
     SPI1->CR2 &= ~(SPI_CR2_SSOE);                   // no hardware SS output
 
-    // 8-bit data size for ILI9341 commands/data
+    // 8-bit data size
     SPI1->CR2 &= ~(SPI_CR2_DS);
     SPI1->CR2 |=  (0x7 << SPI_CR2_DS_Pos);
+
+    // FIFO threshold: assert RXNE when 8 bits (1 byte) received
+    // Required for correct OVR/RXNE behaviour at 8-bit data size
+    SPI1->CR2 |= SPI_CR2_FRXTH;
 
     // enable SPI
     SPI1->CR1 |= SPI_CR1_SPE;
 }
 
+/* -----------------------------------------------------------------------------
+ * function : ILI9341_init()
+ * INs      : none
+ * OUTs     : none
+ * action   : Issues a hardware reset then sends the minimum command sequence
+ *            to bring the ILI9341 out of sleep, configure the pixel format,
+ *            fill the screen black, and turn the display on.
+ * -------------------------------------------------------------------------- */
 void ILI9341_init(void)
 {
+    // hardware reset before sending any commands
+    // guarantees a known register state regardless of power-on conditions
     ILI9341_reset();
 
-    // software reset
-    ILI9341_writeCommand(0x01);
-    HAL_Delay(150);
-
-    // sleep out
+    // Sleep Out — starts oscillator, DC-DC converter, and panel scanning
+    // datasheet requires 120 ms before next command after SLPOUT
     ILI9341_writeCommand(0x11);
-    HAL_Delay(150);
+    HAL_Delay(120);
 
     // pixel format = 16-bit RGB565
     ILI9341_writeCommand(0x3A);
     ILI9341_writeData(0x55);
 
-    // memory access control
-    // 0x48 is common portrait RGB setting
+    // memory access control — portrait orientation, RGB order
     ILI9341_writeCommand(0x36);
     ILI9341_writeData(0x48);
 
+    // fill black while display is still off to avoid flash of garbage
+    ILI9341_fillScreen(COLOR_WHITE);
+
     // display on
     ILI9341_writeCommand(0x29);
-    HAL_Delay(50);
+    HAL_Delay(120);
 }
 
+/* -----------------------------------------------------------------------------
+ * function : SPI1_write8()
+ * INs      : data — byte to transmit
+ * OUTs     : none
+ * action   : Blocks until the TX FIFO has room, writes the byte, then waits
+ *            for BSY to clear (transaction complete). Flushes the RX FIFO
+ *            and clears the OVR flag afterward to prevent flag accumulation
+ *            across successive calls, which can lock the peripheral.
+ *
+ * Note: SPI_CR2_FRXTH must be set (done in TFT_SPI_init) so that RXNE
+ *       asserts on a single received byte rather than two.
+ * -------------------------------------------------------------------------- */
 void SPI1_write8(uint8_t data)
 {
-    // wait until transmit buffer is empty
-    while (!(SPI1->SR & SPI_SR_TXE))
+    // wait until TX FIFO has room for a byte
+    while (!(SPI1->SR & SPI_SR_TXE));
+
+    // write byte — use 8-bit pointer access to avoid pushing a 16/32-bit frame
+    *(volatile uint8_t *)&SPI1->DR = data;
+
+    // wait until the bus is idle (shift register empty)
+    while (SPI1->SR & SPI_SR_BSY);
+
+    // flush any bytes that arrived in the RX FIFO during the transmission
+    // (full-duplex SPI clocks in a byte for every byte sent)
+    while (SPI1->SR & SPI_SR_RXNE)
     {
-        ;
+        (void)(*(volatile uint8_t *)&SPI1->DR);
     }
 
-    // write data
-    SPI1->DR = data;
-
-    // wait until SPI is done transmitting
-    while (SPI1->SR & SPI_SR_BSY)
-    {
-        ;
-    }
+    // clear overrun flag: read DR then read SR
+    // (harmless if OVR is not set)
+    (void)(*(volatile uint8_t *)&SPI1->DR);
+    (void)SPI1->SR;
 }
 
+/* -----------------------------------------------------------------------------
+ * function : ILI9341_writeCommand()
+ * INs      : command — ILI9341 command byte
+ * OUTs     : none
+ * action   : Asserts DC low (command mode), drives CS low, sends the byte,
+ *            then releases CS.
+ * -------------------------------------------------------------------------- */
 void ILI9341_writeCommand(uint8_t command)
 {
     TFT_DC_COMMAND();
@@ -209,6 +259,13 @@ void ILI9341_writeCommand(uint8_t command)
     TFT_CS_HIGH();
 }
 
+/* -----------------------------------------------------------------------------
+ * function : ILI9341_writeData()
+ * INs      : data — data byte to send
+ * OUTs     : none
+ * action   : Asserts DC high (data mode), drives CS low, sends the byte,
+ *            then releases CS.
+ * -------------------------------------------------------------------------- */
 void ILI9341_writeData(uint8_t data)
 {
     TFT_DC_DATA();
@@ -219,6 +276,15 @@ void ILI9341_writeData(uint8_t data)
     TFT_CS_HIGH();
 }
 
+/* -----------------------------------------------------------------------------
+ * function : ILI9341_writeDataBuffer()
+ * INs      : buffer — pointer to byte array
+ *            length — number of bytes to send
+ * OUTs     : none
+ * action   : Sends a contiguous block of data bytes with a single CS
+ *            assertion. More efficient than repeated ILI9341_writeData()
+ *            calls for pixel data. Future DMA integration point.
+ * -------------------------------------------------------------------------- */
 void ILI9341_writeDataBuffer(uint8_t *buffer, uint32_t length)
 {
     TFT_DC_DATA();
@@ -232,6 +298,14 @@ void ILI9341_writeDataBuffer(uint8_t *buffer, uint32_t length)
     TFT_CS_HIGH();
 }
 
+/* -----------------------------------------------------------------------------
+ * function : ILI9341_reset()
+ * INs      : none
+ * OUTs     : none
+ * action   : Pulses RST low for 20 ms then releases it and waits 150 ms for
+ *            the display controller to complete its internal reset sequence.
+ *            Call before ILI9341_init() to guarantee a known register state.
+ * -------------------------------------------------------------------------- */
 void ILI9341_reset(void)
 {
     TFT_RST_LOW();
@@ -240,4 +314,3 @@ void ILI9341_reset(void)
     TFT_RST_HIGH();
     HAL_Delay(150);
 }
-
