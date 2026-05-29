@@ -21,38 +21,92 @@ void interrupt_Priorities( void ){
 
 }
 
+typedef enum {
+    CLR_BLACK = 0,
+    CLR_WHITE,
+    CLR_RED,
+    CLR_GREEN,
+    CLR_BLUE,
+    CLR_YELLOW,
+    CLR_CYAN,
+    CLR_MAGENTA,
+    CLR_ORANGE,
+    CLR_GRAY,
+    CLR_COUNT
+} ColorIndex_t;
+
+const uint16_t colors[CLR_COUNT] = {
+    [CLR_BLACK]   = COLOR_BLACK,
+    [CLR_WHITE]   = COLOR_WHITE,
+    [CLR_RED]     = COLOR_RED,
+    [CLR_GREEN]   = COLOR_GREEN,
+    [CLR_BLUE]    = COLOR_BLUE,
+    [CLR_YELLOW]  = COLOR_YELLOW,
+    [CLR_CYAN]    = COLOR_CYAN,
+    [CLR_MAGENTA] = COLOR_MAGENTA,
+    [CLR_ORANGE]  = COLOR_ORANGE,
+    [CLR_GRAY]    = COLOR_GRAY,
+};
+
+
 int main(void)
 {
+    HAL_Init();
+    SystemClock_Config();
 
-  HAL_Init();
-  SystemClock_Config();
+    /* Core controller state first */
+    PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);   // 5 kHz
+    PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);    // 500 Hz
 
-  PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);  // 5kHz
-  PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);  // 500Hz
+    /* GPIO / motor output hardware */
+    GPIOC_C3_C4_Output_Init();
+    GPIOC_C5_C6_Output_Init();
+    setup_TIM1_A8();
 
-  GPIOC_C3_C4_Output_Init();
-  GPIOC_C5_C6_Output_Init();
-  setup_TIM1_A8();
-  Button_Init();
-  setup_TIM7_ButtonPoll();
+    /* Sensor / input hardware */
+    Encoder_Config();          // motor encoder
+    ADC_init();
 
-  Encoder_Config();        // EXTI0 configured here
-  HMI_Encoder_Config();
-  ADC_init();
-  interrupt_Priorities();  // set priorities after all peripherals initialized
-  setup_LOOPTIMERS();      // enable interrupts last
+    /* HMI input hardware */
+    Button_Init();
+    setup_TIM7_ButtonPoll();
+    HMI_Encoder_Config();      // UI knob encoder
 
-  while (1)
-  {
-	  // Menu Navigation handled here
-     if (Button_WasPressed())
-     {
-         tracking_toggle_request = 1;
-     }
+    /* Display hardware */
+    TFT_SPI_init();
+    ILI9341_init();
 
-  }
+    /*
+     * Draw static display first.
+     * This clears and draws the block diagram background.
+     */
+    ControlLoopDisplay_Draw();
 
+    /*
+     * Draw HMI UI items on top of the static display.
+     * This renders buttons and numeric entries.
+     */
+    UI_Init();
+
+    /*
+     * Configure interrupt priorities after peripherals exist,
+     * but before enabling the control-loop timers.
+     */
+    interrupt_Priorities();
+
+    /*
+     * Enable real-time control-loop interrupts last.
+     * After this, TIM5/TIM6 start running motor-control code.
+     */
+    setup_LOOPTIMERS();
+
+    while (1)
+    {
+        UI_Task();
+    }
 }
+
+
 
 void SystemClock_Config(void)
 {
