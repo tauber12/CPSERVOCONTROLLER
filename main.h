@@ -31,6 +31,9 @@ extern "C" {
 #include "control.h"
 #include "encoder.h"
 #include "HMI.h"
+#include "ILI9341.h"
+#include "ILI9341_text.h"
+#include "control_loop_display.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
