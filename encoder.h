@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 /* Must match TIM5 ARR configuration in control.c */
-#define CONTROL_LOOP_HZ     1000
+#define CONTROL_LOOP_HZ 5000.0f
 
 #define PPR                 7
 #define GEAR_RATIO          150
