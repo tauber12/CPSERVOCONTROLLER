@@ -23,7 +23,7 @@
  *  Ver.|   Date   |  Description
  *  ---------------------------------------------------------------------------
  *      |          | 
- *******************************************************************************
+ ***********************************************3********************************
  *
  * Header format adapted from [Code Appendix by Kevin Vo] pg 5
  */
@@ -37,8 +37,7 @@
 extern volatile uint16_t rawVoltageData;
 
 void ADC_init(void);
-
-
+void ADC_StartConversion(void);
 
 
 #endif /* INC_ADC_C_ */
