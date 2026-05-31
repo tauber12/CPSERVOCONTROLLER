@@ -5,10 +5,13 @@
 extern "C" {
 #endif
 
+#include "control.h"
+
 /* Landscape 320 x 240 static control-loop screen. */
 void ControlLoopDisplay_Init(void);
 void ControlLoopDisplay_Draw(void);
 void ControlLoopDisplay_DrawStatic(void);
+void ControlLoopDisplay_DrawForMode(Controller_State mode);
 
 /* Kept for compatibility. Dynamic UI/readout drawing now lives in HMI.c. */
 void ControlLoopDisplay_Update(void);

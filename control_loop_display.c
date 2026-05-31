@@ -3,14 +3,14 @@
  *
  * Static landscape ILI9341 control-loop diagram.
  *
- * This file now owns only the non-interactive drawing:
+ * This file owns only the non-interactive drawing:
  *   - screen rotation/background
  *   - mode-select title/top band
- *   - control-loop blocks
+ *   - mode-specific control-loop diagrams
  *   - arrows, summing junctions, feedback paths
  *
  * Interactive objects are intentionally not drawn here anymore. Buttons,
- * editable gains, and live numeric readouts are rendered by HMI.c as UI items.
+ * editable gains, presets, and live numeric readouts are rendered by HMI.c.
  */
 
 #include "control_loop_display.h"
@@ -30,6 +30,7 @@
 #define CLD_VEL                COLOR_BLUE
 #define CLD_IN                 COLOR_ORANGE
 #define CLD_PLANT              COLOR_GREEN
+#define CLD_FREQ               COLOR_MAGENTA
 
 #define CLD_TEXT_SCALE         1U
 #define CLD_CHAR_W             6U
@@ -39,10 +40,6 @@
 /* Landscape 320 x 240 layout. These dimensions match the HMI item layout. */
 #define MODE_TITLE_X           5U
 #define MODE_TITLE_Y           3U
-
-#define BYPASS_Y               62U
-#define BYPASS_TEXT_X          73U
-#define BYPASS_TEXT_Y          51U
 
 #define BLOCK_Y                84U
 #define BLOCK_H                70U
@@ -65,6 +62,8 @@
 #define ENC_H                  25U
 #define VEL_FB_Y               178U
 #define POS_FB_Y               216U
+
+static Controller_State cld_last_mode = STATE_POSITION_CONTROL;
 
 static void CLD_SwapU16(uint16_t *a, uint16_t *b)
 {
@@ -284,39 +283,20 @@ static void CLD_DrawSum(uint16_t cx, uint16_t cy, uint16_t color)
 
 static void CLD_DrawStaticModeArea(void)
 {
-    /* This band is only the frame/title. The actual mode buttons are HMI items. */
+    /* This band is only the frame/title. The actual buttons are HMI items. */
     CLD_FillAndBorder(0U, 0U, CLD_W, 47U, CLD_BG, CLD_DIM);
     ILI9341_printString(MODE_TITLE_X,
                         MODE_TITLE_Y,
-                        "MODE SELECT",
+                        "MODE / PRESETS",
                         CLD_FG,
                         CLD_BG,
                         CLD_TEXT_SCALE);
 }
 
-static void CLD_DrawStaticBypass(void)
-{
-    const uint16_t bypass_end_y = (uint16_t)(PATH_Y - CLD_SUM_R - 2U);
-
-    ILI9341_printString(BYPASS_TEXT_X,
-                        BYPASS_TEXT_Y,
-                        "VEL MODE BYPASS",
-                        CLD_DIM,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
-
-    CLD_HLine((uint16_t)(INPUT_X + INPUT_W), SUM_VEL_X, BYPASS_Y, CLD_DIM);
-    CLD_ArrowDown(SUM_VEL_X, BYPASS_Y, bypass_end_y, CLD_DIM);
-}
-
-static void CLD_DrawStaticDiagram(void)
+static void CLD_DrawPlantAndEncoder(void)
 {
     const uint16_t plant_center_x = (uint16_t)(PLANT_X + (PLANT_W / 2U));
-    const uint16_t enc_center_x = (uint16_t)(ENC_X + (ENC_W / 2U));
 
-    CLD_Block(INPUT_X, BLOCK_Y, INPUT_W, BLOCK_H, CLD_IN, "INPUT", "SELECT");
-    CLD_Block(POS_X, BLOCK_Y, POS_W, BLOCK_H, CLD_POS, "POSITION", "PI");
-    CLD_Block(VEL_X, BLOCK_Y, VEL_W, BLOCK_H, CLD_VEL, "VELOCITY", "PI");
     CLD_Block(PLANT_X, BLOCK_Y, PLANT_W, BLOCK_H, CLD_PLANT, "PWM", "MOTOR");
 
     ILI9341_printString((uint16_t)(PLANT_X + 15U),
@@ -338,9 +318,74 @@ static void CLD_DrawStaticDiagram(void)
                         CLD_BG,
                         CLD_TEXT_SCALE);
 
-    CLD_DrawStaticBypass();
+    CLD_FillAndBorder(ENC_X, ENC_Y, ENC_W, ENC_H, CLD_BG, CLD_DIM);
+    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 4U), ENC_W, "ENC", CLD_FG, CLD_BG);
+    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 15U), ENC_W, "POS/VEL", CLD_FG, CLD_BG);
 
-    CLD_ArrowH((uint16_t)(INPUT_X + INPUT_W), (uint16_t)(SUM_POS_X - CLD_SUM_R), PATH_Y, CLD_IN);
+    CLD_ArrowDown(plant_center_x, (uint16_t)(BLOCK_Y + BLOCK_H), (uint16_t)(ENC_Y - 1U), CLD_FG);
+}
+
+static void CLD_DrawStaticDiagramForMode(Controller_State mode)
+{
+    const uint16_t enc_center_x = (uint16_t)(ENC_X + (ENC_W / 2U));
+    uint8_t frequency_mode = (mode == STATE_FREQUENCY_RESPONSE) ? 1U : 0U;
+    uint16_t input_color = (frequency_mode != 0U) ? CLD_FREQ : CLD_IN;
+
+    if (frequency_mode != 0U)
+    {
+        CLD_Block(INPUT_X, BLOCK_Y, INPUT_W, BLOCK_H, input_color, "SINE", "SWEEP");
+        ILI9341_printString((uint16_t)(INPUT_X + 8U),
+                            (uint16_t)(BLOCK_Y + 53U),
+                            "BODE",
+                            input_color,
+                            CLD_BG,
+                            CLD_TEXT_SCALE);
+    }
+    else
+    {
+        CLD_Block(INPUT_X, BLOCK_Y, INPUT_W, BLOCK_H, input_color, "INPUT", "MUX");
+        ILI9341_printString((uint16_t)(INPUT_X + 10U),
+                            (uint16_t)(BLOCK_Y + 53U),
+                            "SRC",
+                            input_color,
+                            CLD_BG,
+                            CLD_TEXT_SCALE);
+    }
+
+    if (mode == STATE_VELOCITY_CONTROL)
+    {
+        /* Velocity mode is drawn as a true direct velocity loop. The inactive
+         * position controller, its summing junction, and its feedback path are
+         * not drawn at all, so stale blocks cannot remain visible.
+         */
+        CLD_Block(VEL_X, BLOCK_Y, VEL_W, BLOCK_H, CLD_VEL, "VELOCITY", "PI");
+        CLD_DrawPlantAndEncoder();
+
+        CLD_ArrowH((uint16_t)(INPUT_X + INPUT_W), (uint16_t)(SUM_VEL_X - CLD_SUM_R), PATH_Y, input_color);
+        CLD_ArrowH((uint16_t)(SUM_VEL_X + CLD_SUM_R), VEL_X, PATH_Y, CLD_VEL);
+        CLD_ArrowH((uint16_t)(VEL_X + VEL_W), PLANT_X, PATH_Y, CLD_PLANT);
+        CLD_DrawSum(SUM_VEL_X, PATH_Y, CLD_VEL);
+
+        CLD_HLine(SUM_VEL_X, ENC_X, VEL_FB_Y, CLD_VEL);
+        CLD_ArrowUp(SUM_VEL_X, VEL_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_VEL);
+        ILI9341_printString(190U,
+                            (uint16_t)(VEL_FB_Y + 5U),
+                            "velocity fb",
+                            CLD_VEL,
+                            CLD_BG,
+                            CLD_TEXT_SCALE);
+        return;
+    }
+
+    /* Position and frequency-response modes use the cascaded position-velocity
+     * loop. Frequency response replaces the normal input source with a sine
+     * sweep and relabels the position feedback as the measured amplitude path.
+     */
+    CLD_Block(POS_X, BLOCK_Y, POS_W, BLOCK_H, CLD_POS, "POSITION", "PI");
+    CLD_Block(VEL_X, BLOCK_Y, VEL_W, BLOCK_H, CLD_VEL, "VELOCITY", "PI");
+    CLD_DrawPlantAndEncoder();
+
+    CLD_ArrowH((uint16_t)(INPUT_X + INPUT_W), (uint16_t)(SUM_POS_X - CLD_SUM_R), PATH_Y, input_color);
     CLD_ArrowH((uint16_t)(SUM_POS_X + CLD_SUM_R), POS_X, PATH_Y, CLD_POS);
     CLD_ArrowH((uint16_t)(POS_X + POS_W), (uint16_t)(SUM_VEL_X - CLD_SUM_R), PATH_Y, CLD_POS);
     CLD_ArrowH((uint16_t)(SUM_VEL_X + CLD_SUM_R), VEL_X, PATH_Y, CLD_VEL);
@@ -349,13 +394,6 @@ static void CLD_DrawStaticDiagram(void)
     CLD_DrawSum(SUM_POS_X, PATH_Y, CLD_POS);
     CLD_DrawSum(SUM_VEL_X, PATH_Y, CLD_VEL);
 
-    CLD_FillAndBorder(ENC_X, ENC_Y, ENC_W, ENC_H, CLD_BG, CLD_DIM);
-    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 4U), ENC_W, "ENC", CLD_FG, CLD_BG);
-    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 15U), ENC_W, "POS/VEL", CLD_FG, CLD_BG);
-
-    CLD_ArrowDown(plant_center_x, (uint16_t)(BLOCK_Y + BLOCK_H), (uint16_t)(ENC_Y - 1U), CLD_FG);
-
-    /* Velocity feedback to velocity summing junction. */
     CLD_HLine(SUM_VEL_X, ENC_X, VEL_FB_Y, CLD_VEL);
     CLD_ArrowUp(SUM_VEL_X, VEL_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_VEL);
     ILI9341_printString(190U,
@@ -365,23 +403,32 @@ static void CLD_DrawStaticDiagram(void)
                         CLD_BG,
                         CLD_TEXT_SCALE);
 
-    /* Position feedback to position summing junction. */
     CLD_VLine(enc_center_x, (uint16_t)(ENC_Y + ENC_H), POS_FB_Y, CLD_POS);
     CLD_HLine(SUM_POS_X, enc_center_x, POS_FB_Y, CLD_POS);
     CLD_ArrowUp(SUM_POS_X, POS_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_POS);
     ILI9341_printString(111U,
                         (uint16_t)(POS_FB_Y + 5U),
-                        "position fb",
+                        (frequency_mode != 0U) ? "position amp" : "position fb",
                         CLD_POS,
                         CLD_BG,
                         CLD_TEXT_SCALE);
+
+    if (frequency_mode != 0U)
+    {
+        ILI9341_printString(6U,
+                            160U,
+                            "FRF: sweep sinusoids, log output amplitude",
+                            CLD_FREQ,
+                            CLD_BG,
+                            CLD_TEXT_SCALE);
+    }
 }
 
 void ControlLoopDisplay_Init(void)
 {
     /* 1 = landscape, 320 x 240, in the rotation-aware text driver. */
     ILI9341_setRotation(1U);
-    ControlLoopDisplay_DrawStatic();
+    ControlLoopDisplay_DrawForMode(cld_last_mode);
 }
 
 void ControlLoopDisplay_Draw(void)
@@ -391,15 +438,30 @@ void ControlLoopDisplay_Draw(void)
 
 void ControlLoopDisplay_DrawStatic(void)
 {
-    ILI9341_fillScreen(CLD_BG);
+    ControlLoopDisplay_DrawForMode(cld_last_mode);
+}
+
+void ControlLoopDisplay_DrawForMode(Controller_State mode)
+{
+    if ((mode != STATE_POSITION_CONTROL) &&
+        (mode != STATE_VELOCITY_CONTROL) &&
+        (mode != STATE_FREQUENCY_RESPONSE))
+    {
+        mode = STATE_POSITION_CONTROL;
+    }
+
+    cld_last_mode = mode;
+
+    ILI9341_setRotation(1U);
+    ILI9341_fillRect(0U, 0U, CLD_W, CLD_H, CLD_BG);
     CLD_DrawStaticModeArea();
-    CLD_DrawStaticDiagram();
+    CLD_DrawStaticDiagramForMode(mode);
 }
 
 void ControlLoopDisplay_Update(void)
 {
     /*
      * No dynamic UI is drawn here anymore.
-     * HMI.c owns all buttons, editable entries, and live numeric readouts.
+     * HMI.c owns all buttons, editable entries, presets, plots, and readouts.
      */
 }

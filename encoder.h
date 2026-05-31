@@ -3,8 +3,8 @@
  * @file           : encoder.h
  * @brief          : Quadrature encoder driver with M/T velocity estimation
  * project         : EE 329 S'26 AX
- * version         : 0.2
- * date            : May 23, 2026
+ * version         : 0.3
+ * date            : May 30, 2026
  *******************************************************************************
  */
 
@@ -14,8 +14,7 @@
 #include "stm32l4xx_hal.h"
 #include <stdint.h>
 
-/* Must match TIM5 ARR configuration in control.c */
-#define CONTROL_LOOP_HZ 5000.0f
+#define ENCODER_DEFAULT_SAMPLE_HZ 5000.0f
 
 #define PPR                 7
 #define GEAR_RATIO          150
@@ -23,6 +22,10 @@
 
 void    Encoder_Config(void);
 void    Encoder_RecordEdge(void);       // called from EXTI0 ISR (in encoder.c)
+
+void    Encoder_SetSampleRateHz(float sample_rate_hz);
+float   Encoder_GetSampleRateHz(void);
+float   Encoder_GetLowRpmThreshold(void);
 
 int32_t Encoder_GetCount(void);
 float   Encoder_GetRevolutions(void);

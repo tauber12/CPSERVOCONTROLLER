@@ -55,8 +55,9 @@ int main(void)
     SystemClock_Config();
 
     /* Core controller state first */
-    PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);   // 5 kHz
-    PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);    // 500 Hz
+    PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);   // default 5 kHz
+    PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);    // default 500 Hz
+    Control_InitPresetsFromCurrent();                     // seed P1/P2
 
     /* GPIO / motor output hardware */
     GPIOC_C3_C4_Output_Init();
