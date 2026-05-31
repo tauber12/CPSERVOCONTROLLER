@@ -1,51 +1,20 @@
 /*
  *******************************************************************************
  * @file           : HMI.c
- * @brief          : Object-like HMI backend for TFT buttons and numeric entries
- * project         : EE 329 S'26 AX
- * authors         : joeym
- * version         : 0.4
- * date            : May 29, 2026
- *******************************************************************************
- * Description:
- *   This file owns all interactive/dynamic UI items on top of the static
- *   control-loop diagram drawn by control_loop_display.c.
- *
- *   UI item model:
- *       item->render(item)
- *       item->on_press(item)
- *       item->on_encoder(item, steps)
- *
- *   Items currently rendered:
- *       - VELOCITY button
- *       - POSITION button
- *       - TRACK button
- *       - Input block source label: SRC:ENC
- *       - Position PI editable entries: Kp, Ki
- *       - Position PI readout: Fs
- *       - Velocity PI editable entries: Kp, Ki
- *       - Velocity PI readout: Fs
- *
- *   Button behavior:
- *       - VELOCITY sets desired_state to STATE_VELOCITY_CONTROL.
- *       - POSITION sets desired_state to STATE_POSITION_CONTROL.
- *       - If tracking is already enabled, velocity/position can switch live.
- *       - TRACK raises tracking_toggle_request and locks HMI encoder scrolling
- *         while the motor is tracking.
- *
- *   The static block diagram, arrows, feedback paths, and block outlines are
- *   intentionally not drawn here. Those belong to control_loop_display.c.
+ * @brief          : TFT HMI, user encoder, presets, input selection, and plots
  *******************************************************************************
  */
 
 #include "HMI.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include "ILI9341_text.h"
 #include "control.h"
+#include "control_loop_display.h"
 
 /* -------------------------------------------------------------------------- */
 /* Button debounce                                                            */
@@ -62,11 +31,8 @@ static uint8_t button_pressed_event = 0U;
 
 void Button_Init(void)
 {
-    /* PC13 input with pull-down. Pressed = 1, not pressed = 0. */
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOCEN;
-
     GPIOC->MODER &= ~(GPIO_MODER_MODE13);
-
     GPIOC->PUPDR &= ~(GPIO_PUPDR_PUPD13);
     GPIOC->PUPDR |=  GPIO_PUPDR_PUPD13_1;
 
@@ -78,12 +44,7 @@ void Button_Init(void)
 
 static uint8_t Button_ReadRaw(void)
 {
-    if ((GPIOC->IDR & GPIO_IDR_ID13) != 0U)
-    {
-        return BUTTON_PRESSED;
-    }
-
-    return BUTTON_NOT_PRESSED;
+    return ((GPIOC->IDR & GPIO_IDR_ID13) != 0U) ? BUTTON_PRESSED : BUTTON_NOT_PRESSED;
 }
 
 void Button_Update_1ms(void)
@@ -95,24 +56,16 @@ void Button_Update_1ms(void)
         button_last_raw_state = raw_state;
         button_debounce_count = 0U;
     }
-    else
+    else if (button_debounce_count < BUTTON_DEBOUNCE_MS)
     {
-        if (button_debounce_count < BUTTON_DEBOUNCE_MS)
+        button_debounce_count++;
+    }
+    else if (button_stable_state != raw_state)
+    {
+        button_stable_state = raw_state;
+        if (button_stable_state == BUTTON_PRESSED)
         {
-            button_debounce_count++;
-        }
-        else if (button_stable_state != raw_state)
-        {
-            button_stable_state = raw_state;
-
-            if (button_stable_state == BUTTON_PRESSED)
-            {
-                button_pressed_event = 1U;
-            }
-        }
-        else
-        {
-            /* Stable, no event. */
+            button_pressed_event = 1U;
         }
     }
 }
@@ -124,24 +77,18 @@ uint8_t Button_WasPressed(void)
         button_pressed_event = 0U;
         return 1U;
     }
-
     return 0U;
 }
 
 void setup_TIM7_ButtonPoll(void)
 {
     RCC->APB1ENR1 |= RCC_APB1ENR1_TIM7EN;
-
-    /* 48 MHz -> 1 MHz, then 1 kHz update interrupt. */
     TIM7->PSC = 47U;
     TIM7->ARR = 999U;
     TIM7->CNT = 0U;
-
     TIM7->SR &= ~TIM_SR_UIF;
     TIM7->DIER |= TIM_DIER_UIE;
-
-    NVIC->ISER[1] |= (1U << (TIM7_IRQn & 0x1FU));
-
+    NVIC->ISER[((uint32_t)TIM7_IRQn >> 5U)] |= (1U << ((uint32_t)TIM7_IRQn & 0x1FU));
     TIM7->CR1 |= TIM_CR1_CEN;
 }
 
@@ -155,19 +102,43 @@ void TIM7_IRQHandler(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/* HMI encoder                                                                */
+/* HMI/user encoder                                                           */
 /* -------------------------------------------------------------------------- */
 
-#define HMI_LOCAL_PPR             600
-#define HMI_LOCAL_COUNTS_PER_REV  (HMI_LOCAL_PPR * 4)
+static volatile int32_t hmi_encoder_overflow_count = 0;
+
+static void HMI_Encoder_ServiceOverflow(void)
+{
+    if ((TIM4->SR & TIM_SR_UIF) != 0U)
+    {
+        uint16_t cnt = (uint16_t)TIM4->CNT;
+        TIM4->SR &= ~TIM_SR_UIF;
+
+        /* In encoder mode, an upward overflow leaves CNT near 0, while a
+         * downward underflow leaves CNT near ARR. Use CNT rather than only DIR
+         * so a direction change immediately after the wrap does not corrupt the
+         * extended count. */
+        if (cnt < 0x8000U)
+        {
+            hmi_encoder_overflow_count += HMI_ENCODER_TIMER_COUNTS;
+        }
+        else
+        {
+            hmi_encoder_overflow_count -= HMI_ENCODER_TIMER_COUNTS;
+        }
+    }
+}
+
+void TIM4_IRQHandler(void)
+{
+    HMI_Encoder_ServiceOverflow();
+}
 
 void HMI_Encoder_Config(void)
 {
-    /* 1. Enable clocks. */
     RCC->APB1ENR1 |= RCC_APB1ENR1_TIM4EN;
     RCC->AHB2ENR  |= RCC_AHB2ENR_GPIOBEN;
 
-    /* 2. PB6 (TI1), PB7 (TI2) -> AF2 (TIM4), pull-up. */
     GPIOB->MODER   &= ~(GPIO_MODER_MODE6 | GPIO_MODER_MODE7);
     GPIOB->MODER   |=  (GPIO_MODER_MODE6_1 | GPIO_MODER_MODE7_1);
     GPIOB->OSPEEDR |=  (GPIO_OSPEEDR_OSPEED6 | GPIO_OSPEEDR_OSPEED7);
@@ -179,40 +150,48 @@ void HMI_Encoder_Config(void)
     GPIOB->AFR[0] |=  ((0x2U << GPIO_AFRL_AFSEL6_Pos) |
                        (0x2U << GPIO_AFRL_AFSEL7_Pos));
 
-    /* 3. Encoder mode x4. */
     TIM4->SMCR &= ~(TIM_SMCR_SMS | TIM_SMCR_SMS_3);
     TIM4->SMCR |=  (3U << TIM_SMCR_SMS_Pos);
 
-    /* 4. TI1->IC1, TI2->IC2, light input filter. */
     TIM4->CCMR1 = 0U;
     TIM4->CCMR1 |= TIM_CCMR1_CC1S_0;
     TIM4->CCMR1 |= TIM_CCMR1_CC2S_0;
-    TIM4->CCMR1 |= (0x2U << TIM_CCMR1_IC1F_Pos);
-    TIM4->CCMR1 |= (0x2U << TIM_CCMR1_IC2F_Pos);
+    TIM4->CCMR1 |= (0x6U << TIM_CCMR1_IC1F_Pos);
+    TIM4->CCMR1 |= (0x6U << TIM_CCMR1_IC2F_Pos);
 
-    /* 5. Active-high polarity, enable capture inputs. */
     TIM4->CCER &= ~(TIM_CCER_CC1P | TIM_CCER_CC2P |
                     TIM_CCER_CC1NP | TIM_CCER_CC2NP);
     TIM4->CCER |=  (TIM_CCER_CC1E | TIM_CCER_CC2E);
 
-    /* 6. Full 16-bit range. */
     TIM4->ARR = 0xFFFFU;
     TIM4->CNT = 0U;
-
-    /* 7. Generate update, clear spurious UIF, start. */
     TIM4->EGR |= TIM_EGR_UG;
     TIM4->SR  &= ~TIM_SR_UIF;
+    TIM4->DIER |= TIM_DIER_UIE;
+
+    hmi_encoder_overflow_count = 0;
+    NVIC->ISER[((uint32_t)TIM4_IRQn >> 5U)] |= (1U << ((uint32_t)TIM4_IRQn & 0x1FU));
+    TIM4->CR1 |= TIM_CR1_CEN;
+}
+
+void HMI_Encoder_ResetCount(void)
+{
+    TIM4->CR1 &= ~TIM_CR1_CEN;
+    hmi_encoder_overflow_count = 0;
+    TIM4->CNT = 0U;
+    TIM4->SR &= ~TIM_SR_UIF;
     TIM4->CR1 |= TIM_CR1_CEN;
 }
 
 int32_t HMI_Encoder_GetCount(void)
 {
-    return (int32_t)(int16_t)TIM4->CNT;
+    HMI_Encoder_ServiceOverflow();
+    return hmi_encoder_overflow_count + (int32_t)((uint16_t)TIM4->CNT);
 }
 
 float HMI_Encoder_GetRevolutions(void)
 {
-    return (float)HMI_Encoder_GetCount() / (float)HMI_LOCAL_COUNTS_PER_REV;
+    return (float)HMI_Encoder_GetCount() / HMI_LOCAL_COUNTS_PER_REV;
 }
 
 float HMI_Encoder_GetDegrees(void)
@@ -221,84 +200,90 @@ float HMI_Encoder_GetDegrees(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Object-like UI item backend                                                */
+/* UI constants and types                                                     */
 /* -------------------------------------------------------------------------- */
 
-#define HMI_ENCODER_COUNTS_PER_STEP   400
-#define HMI_VALUE_REFRESH_MS          200U
+#define HMI_BG                         COLOR_WHITE
+#define HMI_FG                         COLOR_BLACK
+#define HMI_DIM                        COLOR_GRAY
+#define HMI_SELECTED                   COLOR_YELLOW
+#define HMI_TEXT_SCALE                 1U
+#define HMI_CHAR_W                     6U
+#define HMI_BUTTON_BORDER              2U
+#define HMI_FIELD_BORDER               1U
 
-#define HMI_BG                        COLOR_WHITE
-#define HMI_FG                        COLOR_BLACK
-#define HMI_DIM                       COLOR_GRAY
-#define HMI_SELECTED                  COLOR_YELLOW
-#define HMI_TEXT_SCALE                1U
-#define HMI_TEXT_CHAR_W               6U
-#define HMI_BUTTON_TEXT_Y_OFFSET      8U
-#define HMI_BUTTON_BORDER_THICKNESS   2U
-#define HMI_FIELD_BORDER_THICKNESS    1U
+#define MODE_BOX_Y                     19U
+#define MODE_BOX_W                     56U
+#define MODE_BOX_H                     24U
+#define MODE_GAP                       4U
+#define MODE_SLOT_0_X                  4U
+#define MODE_SLOT_1_X                  (MODE_SLOT_0_X + MODE_BOX_W + MODE_GAP)
+#define MODE_SLOT_2_X                  (MODE_SLOT_1_X + MODE_BOX_W + MODE_GAP)
 
-/* These coordinates intentionally match control_loop_display.c. */
-#define MODE_BOX_Y                    19U
-#define MODE_BOX_W                    74U
-#define MODE_BOX_H                    24U
-#define MODE_BOX_GAP                  5U
-#define MODE_SLOT_0_X                 4U
-#define MODE_SLOT_1_X                 (MODE_SLOT_0_X + MODE_BOX_W + MODE_BOX_GAP)
-#define MODE_SLOT_2_X                 (MODE_SLOT_1_X + MODE_BOX_W + MODE_BOX_GAP)
+#define PRESET_BOX_Y                   MODE_BOX_Y
+#define PRESET_BOX_W                   31U
+#define PRESET_BOX_H                   MODE_BOX_H
+#define PRESET_SLOT_0_X                252U
+#define PRESET_SLOT_1_X                286U
 
-#define BLOCK_Y                       84U
-#define BLOCK_H                       70U
-#define INPUT_X                       4U
-#define INPUT_W                       64U
-#define POS_X                         91U
-#define POS_W                         68U
-#define VEL_X                         183U
-#define VEL_W                         68U
+#define BLOCK_Y                        84U
+#define INPUT_X                        4U
+#define INPUT_W                        64U
+#define POS_X                          91U
+#define POS_W                          68U
+#define VEL_X                          183U
+#define VEL_W                          68U
 
-#define VALUE_ROW_0                   (BLOCK_Y + 27U)
-#define VALUE_ROW_1                   (BLOCK_Y + 39U)
-#define VALUE_ROW_2                   (BLOCK_Y + 51U)
-#define VALUE_ROW_3                   (BLOCK_Y + 61U)
+#define VALUE_ROW_0                    (BLOCK_Y + 27U)
+#define VALUE_ROW_1                    (BLOCK_Y + 39U)
+#define VALUE_ROW_2                    (BLOCK_Y + 51U)
+#define VALUE_ROW_3                    (BLOCK_Y + 62U)
+#define FIELD_H                        11U
+#define FIELD_Y(row)                   ((uint16_t)((row) - 2U))
+#define FIELD_X_OFFSET                 2U
+#define FIELD_Y_OFFSET                 2U
 
-#define FIELD_TEXT_Y_OFFSET           2U
-#define FIELD_TEXT_X_OFFSET           2U
-#define FIELD_H                       11U
-#define FIELD_Y(row)                  ((uint16_t)((row) - FIELD_TEXT_Y_OFFSET))
-#define INPUT_FIELD_X                 (INPUT_X + 3U)
-#define INPUT_FIELD_W                 (INPUT_W - 6U)
-#define POS_FIELD_X                   (POS_X + 3U)
-#define POS_FIELD_W                   (POS_W - 6U)
-#define VEL_FIELD_X                   (VEL_X + 3U)
-#define VEL_FIELD_W                   (VEL_W - 6U)
+#define INPUT_FIELD_X                  (INPUT_X + 3U)
+#define INPUT_FIELD_W                  (INPUT_W - 6U)
+#define POS_FIELD_X                    (POS_X + 3U)
+#define POS_FIELD_W                    (POS_W - 6U)
+#define VEL_FIELD_X                    (VEL_X + 3U)
+#define VEL_FIELD_W                    (VEL_W - 6U)
 
-#define INPUT_TEXT_CHARS              8U
-#define PI_TEXT_CHARS                 10U
+#define HMI_FLOAT_MIN_KP               0.0f
+#define HMI_FLOAT_MAX_KP               200.0f
+#define HMI_FLOAT_MIN_KI               0.0f
+#define HMI_FLOAT_MAX_KI               50.0f
+#define HMI_FLOAT_STEP_GAIN            0.10f
+#define HMI_FLOAT_STEP_RANGE           10.0f
+#define HMI_FLOAT_STEP_POS_FS          50.0f
+#define HMI_FLOAT_STEP_VEL_FS          100.0f
+#define HMI_FLOAT_STEP_FREQ            0.05f
+#define HMI_FLOAT_STEP_AMP             5.0f
 
-#define HMI_INVALID_INDEX             0xFFU
+#define HMI_INVALID_INDEX              0xFFU
 
-#define HMI_INDEX_VELOCITY            0U
-#define HMI_INDEX_POSITION            1U
-#define HMI_INDEX_TRACK               2U
-
-#define HMI_FLOAT_MIN_KP              0.0f
-#define HMI_FLOAT_MAX_KP              200.0f
-#define HMI_FLOAT_MIN_KI              0.0f
-#define HMI_FLOAT_MAX_KI              50.0f
-#define HMI_FLOAT_STEP_GAIN           0.10f
+typedef enum
+{
+    HMI_PAGE_DIAGRAM = 0,
+    HMI_PAGE_PLOT,
+    HMI_PAGE_PRESET
+} HmiPage_t;
 
 typedef enum
 {
     UI_ITEM_BUTTON = 0,
     UI_ITEM_FLOAT_ENTRY,
-    UI_ITEM_READOUT
+    UI_ITEM_INPUT_SELECT,
+    UI_ITEM_PRESET_BUTTON
 } UiItemType_t;
 
 typedef struct UiItem UiItem_t;
-
 typedef void (*UiRenderFn_t)(UiItem_t *self);
 typedef void (*UiPressFn_t)(UiItem_t *self);
 typedef void (*UiEncoderFn_t)(UiItem_t *self, int32_t steps);
 typedef void (*UiFormatFn_t)(UiItem_t *self, char *dst, size_t dst_len);
+typedef float (*HmiFloatApplyFn_t)(float value);
 
 typedef struct
 {
@@ -307,29 +292,24 @@ typedef struct
     float max_value;
     float step;
     uint8_t decimals;
+    HmiFloatApplyFn_t apply;
 } HmiFloatEntry_t;
 
 struct UiItem
 {
     UiItemType_t type;
-
     const char *label;
-
     uint16_t x;
     uint16_t y;
     uint16_t w;
     uint16_t h;
-
     uint8_t selectable;
     uint8_t is_selected;
     uint8_t is_on;
     uint8_t text_chars;
-
     uint16_t active_color;
-
     void *data;
     UiFormatFn_t format;
-
     UiRenderFn_t render;
     UiPressFn_t on_press;
     UiEncoderFn_t on_encoder;
@@ -337,251 +317,148 @@ struct UiItem
 
 static void HMI_ButtonRender(UiItem_t *self);
 static void HMI_ButtonPress(UiItem_t *self);
-static void HMI_RenderModeButtons(void);
-static uint8_t HMI_SyncButtonStates(void);
-static void HMI_SyncTrackingLock(void);
-static void HMI_SelectIndex(uint8_t new_index);
-static void HMI_RequestVelocityMode(void);
-static void HMI_RequestPositionMode(void);
-static void HMI_RequestTrackToggle(void);
 static void HMI_FloatEntryRender(UiItem_t *self);
 static void HMI_FloatEntryPress(UiItem_t *self);
 static void HMI_FloatEntryEncoder(UiItem_t *self, int32_t steps);
-static void HMI_ReadoutRender(UiItem_t *self);
-
+static void HMI_InputSelectRender(UiItem_t *self);
+static void HMI_InputSelectPress(UiItem_t *self);
+static void HMI_InputSelectEncoder(UiItem_t *self, int32_t steps);
+static void HMI_PresetButtonPress(UiItem_t *self);
 static void HMI_FormatFloatEntry(UiItem_t *self, char *dst, size_t dst_len);
 static void HMI_FormatInputSource(UiItem_t *self, char *dst, size_t dst_len);
-static void HMI_FormatPosFs(UiItem_t *self, char *dst, size_t dst_len);
-static void HMI_FormatVelFs(UiItem_t *self, char *dst, size_t dst_len);
+static void HMI_FormatPreset(UiItem_t *self, char *dst, size_t dst_len);
 
-static HmiFloatEntry_t hmi_pos_kp = { &ctx_pos.kp, HMI_FLOAT_MIN_KP, HMI_FLOAT_MAX_KP, HMI_FLOAT_STEP_GAIN, 2U };
-static HmiFloatEntry_t hmi_pos_ki = { &ctx_pos.ki, HMI_FLOAT_MIN_KI, HMI_FLOAT_MAX_KI, HMI_FLOAT_STEP_GAIN, 2U };
-static HmiFloatEntry_t hmi_vel_kp = { &ctx_vel.kp, HMI_FLOAT_MIN_KP, HMI_FLOAT_MAX_KP, HMI_FLOAT_STEP_GAIN, 2U };
-static HmiFloatEntry_t hmi_vel_ki = { &ctx_vel.ki, HMI_FLOAT_MIN_KI, HMI_FLOAT_MAX_KI, HMI_FLOAT_STEP_GAIN, 2U };
+static float HMI_ApplyInputAmplitude(float value);
 
-static UiItem_t hmi_items[] =
+static HmiFloatEntry_t hmi_input_freq = { &control_input_wave_freq_hz, CONTROL_INPUT_MIN_FREQ_HZ, CONTROL_INPUT_MAX_FREQ_HZ, HMI_FLOAT_STEP_FREQ, 2U, Control_SetInputWaveFrequencyHz };
+static HmiFloatEntry_t hmi_input_amp  = { &control_input_wave_amplitude, CONTROL_INPUT_MIN_AMPLITUDE, CONTROL_MAX_POS_RANGE_RPM, HMI_FLOAT_STEP_AMP, 0U, HMI_ApplyInputAmplitude };
+static HmiFloatEntry_t hmi_pos_kp     = { &ctx_pos.kp, HMI_FLOAT_MIN_KP, HMI_FLOAT_MAX_KP, HMI_FLOAT_STEP_GAIN, 2U, NULL };
+static HmiFloatEntry_t hmi_pos_ki     = { &ctx_pos.ki, HMI_FLOAT_MIN_KI, HMI_FLOAT_MAX_KI, HMI_FLOAT_STEP_GAIN, 2U, NULL };
+static HmiFloatEntry_t hmi_pos_rng    = { &ctx_pos.output_range, 1.0f, CONTROL_MAX_POS_RANGE_RPM, HMI_FLOAT_STEP_RANGE, 0U, Control_SetPositionOutputRange };
+static HmiFloatEntry_t hmi_pos_fs     = { &control_position_loop_hz, CONTROL_MIN_POS_HZ, CONTROL_MAX_POS_HZ, HMI_FLOAT_STEP_POS_FS, 0U, Control_SetPositionLoopHz };
+static HmiFloatEntry_t hmi_vel_kp     = { &ctx_vel.kp, HMI_FLOAT_MIN_KP, HMI_FLOAT_MAX_KP, HMI_FLOAT_STEP_GAIN, 2U, NULL };
+static HmiFloatEntry_t hmi_vel_ki     = { &ctx_vel.ki, HMI_FLOAT_MIN_KI, HMI_FLOAT_MAX_KI, HMI_FLOAT_STEP_GAIN, 2U, NULL };
+static HmiFloatEntry_t hmi_vel_rng    = { &ctx_vel.output_range, 1.0f, CONTROL_MAX_VEL_RANGE_PWM, 1.0f, 0U, Control_SetVelocityOutputRange };
+static HmiFloatEntry_t hmi_vel_fs     = { &control_velocity_loop_hz, CONTROL_MIN_VEL_HZ, CONTROL_MAX_VEL_HZ, HMI_FLOAT_STEP_VEL_FS, 0U, Control_SetVelocityLoopHz };
+
+enum
 {
-    {
-        .type = UI_ITEM_BUTTON,
-        .label = "VELOCITY",
-        .x = MODE_SLOT_0_X,
-        .y = MODE_BOX_Y,
-        .w = MODE_BOX_W,
-        .h = MODE_BOX_H,
-        .selectable = 1U,
-        .is_selected = 1U,
-        .is_on = 0U,
-        .text_chars = 0U,
-        .active_color = COLOR_BLUE,
-        .data = NULL,
-        .format = NULL,
-        .render = HMI_ButtonRender,
-        .on_press = HMI_ButtonPress,
-        .on_encoder = NULL
-    },
-    {
-        .type = UI_ITEM_BUTTON,
-        .label = "POSITION",
-        .x = MODE_SLOT_1_X,
-        .y = MODE_BOX_Y,
-        .w = MODE_BOX_W,
-        .h = MODE_BOX_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = 0U,
-        .active_color = COLOR_RED,
-        .data = NULL,
-        .format = NULL,
-        .render = HMI_ButtonRender,
-        .on_press = HMI_ButtonPress,
-        .on_encoder = NULL
-    },
-    {
-        .type = UI_ITEM_BUTTON,
-        .label = "TRACK",
-        .x = MODE_SLOT_2_X,
-        .y = MODE_BOX_Y,
-        .w = MODE_BOX_W,
-        .h = MODE_BOX_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = 0U,
-        .active_color = COLOR_GREEN,
-        .data = NULL,
-        .format = NULL,
-        .render = HMI_ButtonRender,
-        .on_press = HMI_ButtonPress,
-        .on_encoder = NULL
-    },
-
-    /* Input Select block source label. */
-    {
-        .type = UI_ITEM_READOUT,
-        .label = "SRC",
-        .x = INPUT_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_1),
-        .w = INPUT_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 0U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = INPUT_TEXT_CHARS,
-        .active_color = HMI_FG,
-        .data = NULL,
-        .format = HMI_FormatInputSource,
-        .render = HMI_ReadoutRender,
-        .on_press = NULL,
-        .on_encoder = NULL
-    },
-
-    /* Position PI items. */
-    {
-        .type = UI_ITEM_FLOAT_ENTRY,
-        .label = "Kp",
-        .x = POS_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_0),
-        .w = POS_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_RED,
-        .data = &hmi_pos_kp,
-        .format = HMI_FormatFloatEntry,
-        .render = HMI_FloatEntryRender,
-        .on_press = HMI_FloatEntryPress,
-        .on_encoder = HMI_FloatEntryEncoder
-    },
-    {
-        .type = UI_ITEM_FLOAT_ENTRY,
-        .label = "Ki",
-        .x = POS_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_1),
-        .w = POS_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_RED,
-        .data = &hmi_pos_ki,
-        .format = HMI_FormatFloatEntry,
-        .render = HMI_FloatEntryRender,
-        .on_press = HMI_FloatEntryPress,
-        .on_encoder = HMI_FloatEntryEncoder
-    },
-    {
-        .type = UI_ITEM_READOUT,
-        .label = "Fs",
-        .x = POS_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_2),
-        .w = POS_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 0U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_RED,
-        .data = NULL,
-        .format = HMI_FormatPosFs,
-        .render = HMI_ReadoutRender,
-        .on_press = NULL,
-        .on_encoder = NULL
-    },
-
-    /* Velocity PI items. */
-    {
-        .type = UI_ITEM_FLOAT_ENTRY,
-        .label = "Kp",
-        .x = VEL_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_0),
-        .w = VEL_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_BLUE,
-        .data = &hmi_vel_kp,
-        .format = HMI_FormatFloatEntry,
-        .render = HMI_FloatEntryRender,
-        .on_press = HMI_FloatEntryPress,
-        .on_encoder = HMI_FloatEntryEncoder
-    },
-    {
-        .type = UI_ITEM_FLOAT_ENTRY,
-        .label = "Ki",
-        .x = VEL_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_1),
-        .w = VEL_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 1U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_BLUE,
-        .data = &hmi_vel_ki,
-        .format = HMI_FormatFloatEntry,
-        .render = HMI_FloatEntryRender,
-        .on_press = HMI_FloatEntryPress,
-        .on_encoder = HMI_FloatEntryEncoder
-    },
-    {
-        .type = UI_ITEM_READOUT,
-        .label = "Fs",
-        .x = VEL_FIELD_X,
-        .y = FIELD_Y(VALUE_ROW_2),
-        .w = VEL_FIELD_W,
-        .h = FIELD_H,
-        .selectable = 0U,
-        .is_selected = 0U,
-        .is_on = 0U,
-        .text_chars = PI_TEXT_CHARS,
-        .active_color = COLOR_BLUE,
-        .data = NULL,
-        .format = HMI_FormatVelFs,
-        .render = HMI_ReadoutRender,
-        .on_press = NULL,
-        .on_encoder = NULL
-    }
+    HMI_INDEX_VELOCITY = 0,
+    HMI_INDEX_POSITION,
+    HMI_INDEX_START,
+    HMI_INDEX_PRESET1,
+    HMI_INDEX_PRESET2,
+    HMI_INDEX_INPUT_SOURCE,
+    HMI_INDEX_INPUT_FREQ,
+    HMI_INDEX_INPUT_AMP,
+    HMI_INDEX_POS_KP,
+    HMI_INDEX_POS_KI,
+    HMI_INDEX_POS_RANGE,
+    HMI_INDEX_POS_FS,
+    HMI_INDEX_VEL_KP,
+    HMI_INDEX_VEL_KI,
+    HMI_INDEX_VEL_RANGE,
+    HMI_INDEX_VEL_FS,
+    HMI_ITEM_COUNT
 };
 
-#define HMI_ITEM_COUNT ((uint8_t)(sizeof(hmi_items) / sizeof(hmi_items[0])))
+static UiItem_t hmi_items[HMI_ITEM_COUNT] =
+{
+    [HMI_INDEX_VELOCITY] = { UI_ITEM_BUTTON, "VELOCITY", MODE_SLOT_0_X, MODE_BOX_Y, MODE_BOX_W, MODE_BOX_H, 1U, 1U, 0U, 0U, COLOR_BLUE, NULL, NULL, HMI_ButtonRender, HMI_ButtonPress, NULL },
+    [HMI_INDEX_POSITION] = { UI_ITEM_BUTTON, "POSITION", MODE_SLOT_1_X, MODE_BOX_Y, MODE_BOX_W, MODE_BOX_H, 1U, 0U, 0U, 0U, COLOR_RED, NULL, NULL, HMI_ButtonRender, HMI_ButtonPress, NULL },
+    [HMI_INDEX_START]    = { UI_ITEM_BUTTON, "START",    MODE_SLOT_2_X, MODE_BOX_Y, MODE_BOX_W, MODE_BOX_H, 1U, 0U, 0U, 0U, COLOR_GREEN, NULL, NULL, HMI_ButtonRender, HMI_ButtonPress, NULL },
+    [HMI_INDEX_PRESET1]  = { UI_ITEM_PRESET_BUTTON, "P1", PRESET_SLOT_0_X, PRESET_BOX_Y, PRESET_BOX_W, PRESET_BOX_H, 1U, 0U, 0U, 0U, COLOR_CYAN, (void *)0U, HMI_FormatPreset, HMI_ButtonRender, HMI_PresetButtonPress, NULL },
+    [HMI_INDEX_PRESET2]  = { UI_ITEM_PRESET_BUTTON, "P2", PRESET_SLOT_1_X, PRESET_BOX_Y, PRESET_BOX_W, PRESET_BOX_H, 1U, 0U, 0U, 0U, COLOR_CYAN, (void *)1U, HMI_FormatPreset, HMI_ButtonRender, HMI_PresetButtonPress, NULL },
 
-static uint8_t hmi_selected_index = 0U;
+    [HMI_INDEX_INPUT_SOURCE] = { UI_ITEM_INPUT_SELECT, "SRC", INPUT_FIELD_X, FIELD_Y(VALUE_ROW_1), INPUT_FIELD_W, FIELD_H, 1U, 0U, 0U, 9U, COLOR_ORANGE, NULL, HMI_FormatInputSource, HMI_InputSelectRender, HMI_InputSelectPress, HMI_InputSelectEncoder },
+    [HMI_INDEX_INPUT_FREQ]   = { UI_ITEM_FLOAT_ENTRY, "Fq", INPUT_FIELD_X, FIELD_Y(VALUE_ROW_2), INPUT_FIELD_W, FIELD_H, 1U, 0U, 0U, 9U, COLOR_ORANGE, &hmi_input_freq, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_INPUT_AMP]    = { UI_ITEM_FLOAT_ENTRY, "Amp", INPUT_FIELD_X, FIELD_Y(VALUE_ROW_3), INPUT_FIELD_W, FIELD_H, 1U, 0U, 0U, 9U, COLOR_ORANGE, &hmi_input_amp, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+
+    [HMI_INDEX_POS_KP]       = { UI_ITEM_FLOAT_ENTRY, "Kp",  POS_FIELD_X, FIELD_Y(VALUE_ROW_0), POS_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_RED, &hmi_pos_kp, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_POS_KI]       = { UI_ITEM_FLOAT_ENTRY, "Ki",  POS_FIELD_X, FIELD_Y(VALUE_ROW_1), POS_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_RED, &hmi_pos_ki, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_POS_RANGE]    = { UI_ITEM_FLOAT_ENTRY, "Rng", POS_FIELD_X, FIELD_Y(VALUE_ROW_2), POS_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_RED, &hmi_pos_rng, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_POS_FS]       = { UI_ITEM_FLOAT_ENTRY, "Fs",  POS_FIELD_X, FIELD_Y(VALUE_ROW_3), POS_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_RED, &hmi_pos_fs, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+
+    [HMI_INDEX_VEL_KP]       = { UI_ITEM_FLOAT_ENTRY, "Kp",  VEL_FIELD_X, FIELD_Y(VALUE_ROW_0), VEL_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_BLUE, &hmi_vel_kp, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_VEL_KI]       = { UI_ITEM_FLOAT_ENTRY, "Ki",  VEL_FIELD_X, FIELD_Y(VALUE_ROW_1), VEL_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_BLUE, &hmi_vel_ki, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_VEL_RANGE]    = { UI_ITEM_FLOAT_ENTRY, "Rng", VEL_FIELD_X, FIELD_Y(VALUE_ROW_2), VEL_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_BLUE, &hmi_vel_rng, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder },
+    [HMI_INDEX_VEL_FS]       = { UI_ITEM_FLOAT_ENTRY, "Fs",  VEL_FIELD_X, FIELD_Y(VALUE_ROW_3), VEL_FIELD_W, FIELD_H, 1U, 0U, 0U, 10U, COLOR_BLUE, &hmi_vel_fs, HMI_FormatFloatEntry, HMI_FloatEntryRender, HMI_FloatEntryPress, HMI_FloatEntryEncoder }
+};
+
+static HmiPage_t hmi_page = HMI_PAGE_DIAGRAM;
+static uint8_t hmi_selected_index = HMI_INDEX_VELOCITY;
 static uint8_t hmi_editing = 0U;
 static uint8_t hmi_tracking_lock = 0U;
+static uint8_t hmi_layout_dirty = 0U;
 static int32_t hmi_last_encoder_count = 0;
 static int32_t hmi_encoder_accum = 0;
 static uint32_t hmi_last_value_refresh_ms = 0U;
+static uint32_t hmi_last_plot_refresh_ms = 0U;
+static uint16_t hmi_plot_x = 0U;
+
+static uint8_t hmi_preset_slot = 0U;
+static uint8_t hmi_preset_selected = 0U;
+static uint8_t hmi_preset_editing = 0U;
+
+/* -------------------------------------------------------------------------- */
+/* Small drawing/format helpers                                               */
+/* -------------------------------------------------------------------------- */
 
 static uint16_t HMI_TextWidth(const char *s)
 {
     uint16_t n = 0U;
-
     if (s == NULL)
     {
         return 0U;
     }
-
     while (*s != '\0')
     {
         n++;
         s++;
     }
-
-    return (uint16_t)(n * HMI_TEXT_CHAR_W * HMI_TEXT_SCALE);
+    return (uint16_t)(n * HMI_CHAR_W * HMI_TEXT_SCALE);
 }
 
-static void HMI_DrawRectBorder(uint16_t x,
-                               uint16_t y,
-                               uint16_t w,
-                               uint16_t h,
-                               uint16_t color,
-                               uint16_t thickness)
+static void HMI_DrawPixel(int16_t x, int16_t y, uint16_t color)
+{
+    if ((x < 0) || (y < 0) || (x >= 320) || (y >= 240))
+    {
+        return;
+    }
+    ILI9341_fillRect((uint16_t)x, (uint16_t)y, 1U, 1U, color);
+}
+
+static void HMI_DrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_t color)
+{
+    int16_t dx = (x1 > x0) ? (int16_t)(x1 - x0) : (int16_t)(x0 - x1);
+    int16_t sx = (x0 < x1) ? 1 : -1;
+    int16_t dy = (y1 > y0) ? (int16_t)(y0 - y1) : (int16_t)(y1 - y0);
+    int16_t sy = (y0 < y1) ? 1 : -1;
+    int16_t err = (int16_t)(dx + dy);
+
+    for (;;)
+    {
+        HMI_DrawPixel(x0, y0, color);
+        if ((x0 == x1) && (y0 == y1))
+        {
+            break;
+        }
+        int16_t e2 = (int16_t)(2 * err);
+        if (e2 >= dy)
+        {
+            err = (int16_t)(err + dy);
+            x0 = (int16_t)(x0 + sx);
+        }
+        if (e2 <= dx)
+        {
+            err = (int16_t)(err + dx);
+            y0 = (int16_t)(y0 + sy);
+        }
+    }
+}
+
+static void HMI_DrawRectBorder(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                               uint16_t color, uint16_t thickness)
 {
     ILI9341_fillRect(x, y, w, thickness, color);
     ILI9341_fillRect(x, (uint16_t)(y + h - thickness), w, thickness, color);
@@ -592,21 +469,14 @@ static void HMI_DrawRectBorder(uint16_t x,
 static void HMI_FloatToStr(char *dst, size_t dst_len, float value, uint8_t decimals)
 {
     int32_t scale = 1;
-
     for (uint8_t i = 0U; i < decimals; i++)
     {
         scale *= 10;
     }
 
-    int32_t scaled;
-    if (value >= 0.0f)
-    {
-        scaled = (int32_t)((value * (float)scale) + 0.5f);
-    }
-    else
-    {
-        scaled = (int32_t)((value * (float)scale) - 0.5f);
-    }
+    int32_t scaled = (value >= 0.0f) ?
+        (int32_t)((value * (float)scale) + 0.5f) :
+        (int32_t)((value * (float)scale) - 0.5f);
 
     const char *sign = "";
     if (scaled < 0)
@@ -626,268 +496,406 @@ static void HMI_FloatToStr(char *dst, size_t dst_len, float value, uint8_t decim
     {
         (void)snprintf(dst, dst_len, "%s%ld.%01ld", sign, (long)whole, (long)frac);
     }
-    else if (decimals == 2U)
-    {
-        (void)snprintf(dst, dst_len, "%s%ld.%02ld", sign, (long)whole, (long)frac);
-    }
     else
     {
-        (void)snprintf(dst, dst_len, "%s%ld.%03ld", sign, (long)whole, (long)frac);
+        (void)snprintf(dst, dst_len, "%s%ld.%02ld", sign, (long)whole, (long)frac);
     }
 }
 
 static void HMI_RateToStr(char *dst, size_t dst_len, float hz)
 {
     char n[16];
-
     if (hz >= 1000.0f)
     {
         HMI_FloatToStr(n, sizeof(n), hz / 1000.0f, 1U);
-        (void)snprintf(dst, dst_len, "%skHz", n);
+        (void)snprintf(dst, dst_len, "%sk", n);
     }
     else
     {
         HMI_FloatToStr(n, sizeof(n), hz, 0U);
-        (void)snprintf(dst, dst_len, "%sHz", n);
+        (void)snprintf(dst, dst_len, "%s", n);
     }
 }
 
-static float HMI_TimerRateHz(TIM_TypeDef *tim)
-{
-    uint32_t psc = tim->PSC + 1U;
-    uint32_t arr = tim->ARR + 1U;
-
-    if ((psc == 0U) || (arr == 0U))
-    {
-        return 0.0f;
-    }
-
-    return ((float)SystemCoreClock) / ((float)psc * (float)arr);
-}
-
-static void HMI_PrintFixedWidth(uint16_t x,
-                                uint16_t y,
-                                const char *s,
-                                uint8_t chars,
-                                uint16_t fg,
-                                uint16_t bg)
+static void HMI_PrintFixedWidth(uint16_t x, uint16_t y, const char *s,
+                                uint8_t chars, uint16_t fg, uint16_t bg)
 {
     char padded[32];
-    uint8_t i;
-
     if (chars >= sizeof(padded))
     {
         chars = (uint8_t)(sizeof(padded) - 1U);
     }
 
-    for (i = 0U; i < chars; i++)
+    for (uint8_t i = 0U; i < chars; i++)
     {
-        if ((s != NULL) && (s[i] != '\0'))
-        {
-            padded[i] = s[i];
-        }
-        else
-        {
-            padded[i] = ' ';
-        }
+        padded[i] = ((s != NULL) && (s[i] != '\0')) ? s[i] : ' ';
+    }
+    padded[chars] = '\0';
+    ILI9341_printString(x, y, padded, fg, bg, HMI_TEXT_SCALE);
+}
+
+static float HMI_WrapDeg180(float deg)
+{
+    deg = fmodf(deg, 360.0f);
+    if (deg > 180.0f)
+    {
+        deg -= 360.0f;
+    }
+    else if (deg < -180.0f)
+    {
+        deg += 360.0f;
+    }
+    return deg;
+}
+
+static int16_t HMI_MapY(float value, float min_value, float max_value)
+{
+    if (value < min_value)
+    {
+        value = min_value;
+    }
+    else if (value > max_value)
+    {
+        value = max_value;
     }
 
-    padded[chars] = '\0';
+    float span = max_value - min_value;
+    if (span <= 0.0f)
+    {
+        return (int16_t)(HMI_PLOT_Y + (HMI_PLOT_H / 2U));
+    }
 
-    ILI9341_printString(x, y, padded, fg, bg, HMI_TEXT_SCALE);
+    float frac = (value - min_value) / span;
+    return (int16_t)((float)(HMI_PLOT_Y + HMI_PLOT_H - 2U) -
+                     (frac * (float)(HMI_PLOT_H - 3U)));
+}
+
+/* -------------------------------------------------------------------------- */
+/* UI item visibility and navigation                                          */
+/* -------------------------------------------------------------------------- */
+
+static uint8_t HMI_ItemIsVisible(uint8_t index)
+{
+    if (index >= HMI_ITEM_COUNT)
+    {
+        return 0U;
+    }
+
+    if ((index == HMI_INDEX_INPUT_FREQ) || (index == HMI_INDEX_INPUT_AMP))
+    {
+        return (control_input_source == CONTROL_INPUT_USER) ? 0U : 1U;
+    }
+
+    if ((index == HMI_INDEX_POS_KP) ||
+        (index == HMI_INDEX_POS_KI) ||
+        (index == HMI_INDEX_POS_RANGE) ||
+        (index == HMI_INDEX_POS_FS))
+    {
+        return (desired_state == STATE_POSITION_CONTROL) ? 1U : 0U;
+    }
+
+    return 1U;
+}
+
+static void HMI_ClearSelectionState(void)
+{
+    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    {
+        hmi_items[i].is_selected = 0U;
+    }
+}
+
+static uint8_t HMI_FirstSelectableIndex(void)
+{
+    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    {
+        if ((hmi_items[i].selectable != 0U) && (HMI_ItemIsVisible(i) != 0U))
+        {
+            return i;
+        }
+    }
+    return HMI_INVALID_INDEX;
+}
+
+static void HMI_EnsureSelectedVisible(void)
+{
+    if ((hmi_selected_index < HMI_ITEM_COUNT) &&
+        (hmi_items[hmi_selected_index].selectable != 0U) &&
+        (HMI_ItemIsVisible(hmi_selected_index) != 0U))
+    {
+        hmi_items[hmi_selected_index].is_selected = 1U;
+        return;
+    }
+
+    HMI_ClearSelectionState();
+    hmi_selected_index = HMI_FirstSelectableIndex();
+    if (hmi_selected_index != HMI_INVALID_INDEX)
+    {
+        hmi_items[hmi_selected_index].is_selected = 1U;
+    }
+    else
+    {
+        hmi_selected_index = 0U;
+    }
+}
+
+static void HMI_ResetEncoderAccumulator(void)
+{
+    hmi_last_encoder_count = HMI_Encoder_GetCount();
+    hmi_encoder_accum = 0;
+}
+
+static int32_t HMI_ConsumeEncoderSteps(void)
+{
+    int32_t count = HMI_Encoder_GetCount();
+    int32_t delta = count - hmi_last_encoder_count;
+    hmi_last_encoder_count = count;
+
+    int32_t delta_limit = HMI_ENCODER_COUNTS_PER_STEP * HMI_ENCODER_MAX_STEPS_PER_TASK;
+    if (delta > delta_limit)
+    {
+        delta = delta_limit;
+    }
+    else if (delta < -delta_limit)
+    {
+        delta = -delta_limit;
+    }
+
+    hmi_encoder_accum += delta;
+    if (hmi_encoder_accum > delta_limit)
+    {
+        hmi_encoder_accum = delta_limit;
+    }
+    else if (hmi_encoder_accum < -delta_limit)
+    {
+        hmi_encoder_accum = -delta_limit;
+    }
+
+    int32_t steps = hmi_encoder_accum / HMI_ENCODER_COUNTS_PER_STEP;
+    if (steps != 0)
+    {
+        hmi_encoder_accum -= steps * HMI_ENCODER_COUNTS_PER_STEP;
+    }
+    return steps;
 }
 
 static void HMI_RenderItem(uint8_t index)
 {
-    if (index >= HMI_ITEM_COUNT)
+    if ((index >= HMI_ITEM_COUNT) || (HMI_ItemIsVisible(index) == 0U))
     {
         return;
     }
-
     if (hmi_items[index].render != NULL)
     {
         hmi_items[index].render(&hmi_items[index]);
     }
 }
 
-static void HMI_RenderAllItems(void)
+static void HMI_RenderTopItems(void)
 {
-    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    for (uint8_t i = HMI_INDEX_VELOCITY; i <= HMI_INDEX_PRESET2; i++)
     {
         HMI_RenderItem(i);
     }
 }
 
-static void HMI_RenderReadouts(void)
+static void HMI_RenderDiagramItems(void)
 {
-    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    for (uint8_t i = HMI_INDEX_INPUT_SOURCE; i < HMI_ITEM_COUNT; i++)
     {
-        if (hmi_items[i].type == UI_ITEM_READOUT)
-        {
-            HMI_RenderItem(i);
-        }
+        HMI_RenderItem(i);
     }
 }
 
-static void HMI_RenderModeButtons(void)
+static void HMI_RenderAllItems(void)
 {
-    HMI_RenderItem(HMI_INDEX_VELOCITY);
-    HMI_RenderItem(HMI_INDEX_POSITION);
-    HMI_RenderItem(HMI_INDEX_TRACK);
+    HMI_RenderTopItems();
+    HMI_RenderDiagramItems();
 }
 
 static uint8_t HMI_SyncButtonStates(void)
 {
     uint8_t changed = 0U;
-
-    /*
-     * Velocity and position show desired_state so the user can choose the
-     * startup tracking mode even while current_state is STATE_DISABLED.
-     * TRACK shows whether tracking is currently active or pending.
-     */
     uint8_t velocity_on = (desired_state == STATE_VELOCITY_CONTROL) ? 1U : 0U;
     uint8_t position_on = (desired_state == STATE_POSITION_CONTROL) ? 1U : 0U;
-    uint8_t track_on = ((Control_IsTrackingEnabled() != 0U) ||
-                        (hmi_tracking_lock != 0U)) ? 1U : 0U;
+    uint8_t start_on = (Control_IsTrackingEnabled() != 0U) ? 1U : 0U;
 
     if (hmi_items[HMI_INDEX_VELOCITY].is_on != velocity_on)
     {
         hmi_items[HMI_INDEX_VELOCITY].is_on = velocity_on;
         changed = 1U;
     }
-
     if (hmi_items[HMI_INDEX_POSITION].is_on != position_on)
     {
         hmi_items[HMI_INDEX_POSITION].is_on = position_on;
         changed = 1U;
     }
-
-    if (hmi_items[HMI_INDEX_TRACK].is_on != track_on)
+    if (hmi_items[HMI_INDEX_START].is_on != start_on)
     {
-        hmi_items[HMI_INDEX_TRACK].is_on = track_on;
+        hmi_items[HMI_INDEX_START].is_on = start_on;
         changed = 1U;
     }
-
     return changed;
-}
-
-static void HMI_SyncTrackingLock(void)
-{
-    if (Control_IsTrackingEnabled() != 0U)
-    {
-        if (hmi_tracking_lock == 0U)
-        {
-            hmi_tracking_lock = 1U;
-            hmi_editing = 0U;
-            HMI_SelectIndex(HMI_INDEX_TRACK);
-        }
-    }
-    else
-    {
-        /*
-         * Do not unlock while a tracking toggle request is still pending in
-         * control.c. This prevents a fast UI_Task() pass from briefly giving
-         * the encoder back to HMI before TIM6 processes the request.
-         */
-        if (tracking_toggle_request == 0U)
-        {
-            hmi_tracking_lock = 0U;
-        }
-    }
 }
 
 static void HMI_SelectIndex(uint8_t new_index)
 {
-    if ((new_index >= HMI_ITEM_COUNT) || (hmi_items[new_index].selectable == 0U))
+    if ((new_index >= HMI_ITEM_COUNT) ||
+        (hmi_items[new_index].selectable == 0U) ||
+        (HMI_ItemIsVisible(new_index) == 0U))
     {
         return;
     }
 
     uint8_t old_index = hmi_selected_index;
-
     if (new_index == old_index)
     {
         hmi_items[hmi_selected_index].is_selected = 1U;
-        HMI_RenderItem(hmi_selected_index);
         return;
     }
 
     hmi_items[old_index].is_selected = 0U;
     hmi_selected_index = new_index;
     hmi_items[hmi_selected_index].is_selected = 1U;
-
     HMI_RenderItem(old_index);
     HMI_RenderItem(hmi_selected_index);
+}
+
+static uint8_t HMI_FindNextSelectable(uint8_t start_index, int8_t direction)
+{
+    uint8_t index = start_index;
+    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    {
+        if (direction > 0)
+        {
+            index++;
+            if (index >= HMI_ITEM_COUNT)
+            {
+                index = 0U;
+            }
+        }
+        else if (index == 0U)
+        {
+            index = (uint8_t)(HMI_ITEM_COUNT - 1U);
+        }
+        else
+        {
+            index--;
+        }
+
+        if ((hmi_items[index].selectable != 0U) && (HMI_ItemIsVisible(index) != 0U))
+        {
+            return index;
+        }
+    }
+    return start_index;
+}
+
+static void HMI_MoveSelectionBySteps(int32_t steps)
+{
+    if (steps == 0)
+    {
+        return;
+    }
+
+    uint8_t new_index = hmi_selected_index;
+    int8_t direction = (steps > 0) ? 1 : -1;
+    int32_t count = (steps > 0) ? steps : -steps;
+    while (count > 0)
+    {
+        new_index = HMI_FindNextSelectable(new_index, direction);
+        count--;
+    }
+    HMI_SelectIndex(new_index);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Page redraw helpers                                                        */
+/* -------------------------------------------------------------------------- */
+
+static void HMI_RedrawFullDiagramPage(void)
+{
+    hmi_page = HMI_PAGE_DIAGRAM;
+    hmi_editing = 0U;
+    HMI_ResetEncoderAccumulator();
+    ControlLoopDisplay_DrawForMode(desired_state);
+    (void)HMI_SyncButtonStates();
+    HMI_EnsureSelectedVisible();
+    HMI_RenderAllItems();
+    hmi_last_value_refresh_ms = HAL_GetTick();
+}
+
+static void HMI_RedrawDiagramAreaOnly(void)
+{
+    hmi_page = HMI_PAGE_DIAGRAM;
+    HMI_ResetEncoderAccumulator();
+    ControlLoopDisplay_DrawDiagramOnlyForMode(desired_state);
+    HMI_EnsureSelectedVisible();
+    HMI_RenderDiagramItems();
+    hmi_last_value_refresh_ms = HAL_GetTick();
+    hmi_layout_dirty = 0U;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Item renderers and actions                                                 */
+/* -------------------------------------------------------------------------- */
+
+static void HMI_ButtonRender(UiItem_t *self)
+{
+    uint16_t fill = self->is_on ? self->active_color : HMI_BG;
+    uint16_t fg = self->is_on ? COLOR_WHITE : HMI_FG;
+    uint16_t border = self->is_selected ? HMI_SELECTED : HMI_DIM;
+
+    ILI9341_fillRect(self->x, self->y, self->w, self->h, fill);
+    HMI_DrawRectBorder(self->x, self->y, self->w, self->h, border, HMI_BUTTON_BORDER);
+
+    uint16_t tw = HMI_TextWidth(self->label);
+    uint16_t tx = (tw < self->w) ? (uint16_t)(self->x + ((self->w - tw) / 2U)) : self->x;
+    ILI9341_printString(tx, (uint16_t)(self->y + 8U), self->label, fg, fill, HMI_TEXT_SCALE);
 }
 
 static void HMI_RequestVelocityMode(void)
 {
     Control_SetDesiredState(STATE_VELOCITY_CONTROL);
+    hmi_editing = 0U;
+    (void)HMI_SyncButtonStates();
+    HMI_RenderTopItems();
+    HMI_RedrawDiagramAreaOnly();
 }
 
 static void HMI_RequestPositionMode(void)
 {
     Control_SetDesiredState(STATE_POSITION_CONTROL);
-}
-
-static void HMI_RequestTrackToggle(void)
-{
-    tracking_toggle_request = 1U;
     hmi_editing = 0U;
-    HMI_SelectIndex(HMI_INDEX_TRACK);
-
-    /*
-     * If this press is an enable request, lock immediately so the next encoder
-     * movement goes to the position target instead of scrolling the UI. If this
-     * press is a disable request, stay locked until control.c processes the
-     * request and current_state returns to STATE_DISABLED.
-     */
-    hmi_tracking_lock = 1U;
+    (void)HMI_SyncButtonStates();
+    HMI_RenderTopItems();
+    HMI_RedrawDiagramAreaOnly();
 }
 
-static void HMI_ButtonRender(UiItem_t *self)
+static void HMI_ShowPlotPage(void);
+
+static void HMI_RequestStartToggle(void)
 {
-    if (self == NULL)
+    hmi_editing = 0U;
+    HMI_SelectIndex(HMI_INDEX_START);
+
+    if (Control_IsTrackingEnabled() == 0U)
     {
-        return;
+        Control_EnterTracking();
+        hmi_tracking_lock = 1U;
+        (void)HMI_SyncButtonStates();
+        HMI_ShowPlotPage();
     }
-
-    uint16_t fill_color = self->is_on ? self->active_color : HMI_BG;
-    uint16_t text_color = self->is_on ? COLOR_WHITE : COLOR_BLACK;
-    uint16_t border_color = self->is_selected ? HMI_SELECTED : HMI_DIM;
-
-    ILI9341_fillRect(self->x, self->y, self->w, self->h, fill_color);
-
-    HMI_DrawRectBorder(self->x,
-                       self->y,
-                       self->w,
-                       self->h,
-                       border_color,
-                       HMI_BUTTON_BORDER_THICKNESS);
-
-    uint16_t text_w = HMI_TextWidth(self->label);
-    uint16_t text_x = self->x;
-
-    if (self->w > text_w)
+    else
     {
-        text_x = (uint16_t)(self->x + ((self->w - text_w) / 2U));
+        Control_ExitTracking();
+        hmi_tracking_lock = 0U;
+        HMI_RedrawFullDiagramPage();
     }
-
-    ILI9341_printString(text_x,
-                        (uint16_t)(self->y + HMI_BUTTON_TEXT_Y_OFFSET),
-                        self->label,
-                        text_color,
-                        fill_color,
-                        HMI_TEXT_SCALE);
 }
 
 static void HMI_ButtonPress(UiItem_t *self)
 {
-    if (self == NULL)
-    {
-        return;
-    }
-
     if (self == &hmi_items[HMI_INDEX_VELOCITY])
     {
         HMI_RequestVelocityMode();
@@ -896,72 +904,55 @@ static void HMI_ButtonPress(UiItem_t *self)
     {
         HMI_RequestPositionMode();
     }
-    else if (self == &hmi_items[HMI_INDEX_TRACK])
+    else if (self == &hmi_items[HMI_INDEX_START])
     {
-        HMI_RequestTrackToggle();
+        HMI_RequestStartToggle();
     }
-    else
-    {
-        /* Unknown button object. */
-    }
+}
 
-    (void)HMI_SyncButtonStates();
+static float HMI_ApplyInputAmplitude(float value)
+{
+    return Control_SetInputWaveAmplitude(value);
 }
 
 static void HMI_FormatFloatEntry(UiItem_t *self, char *dst, size_t dst_len)
 {
     char num[16];
     HmiFloatEntry_t *entry = (HmiFloatEntry_t *)self->data;
-
     if ((entry == NULL) || (entry->value == NULL))
     {
         (void)snprintf(dst, dst_len, "%s=?", self->label);
         return;
     }
 
-    HMI_FloatToStr(num, sizeof(num), *(entry->value), entry->decimals);
+    if ((self->label[0] == 'F') && (self->label[1] == 's'))
+    {
+        HMI_RateToStr(num, sizeof(num), *(entry->value));
+    }
+    else
+    {
+        HMI_FloatToStr(num, sizeof(num), *(entry->value), entry->decimals);
+    }
+
     (void)snprintf(dst, dst_len, "%s=%s", self->label, num);
 }
 
 static void HMI_FloatEntryRender(UiItem_t *self)
 {
     char text[24];
+    self->format(self, text, sizeof(text));
 
-    if (self == NULL)
-    {
-        return;
-    }
-
-    if (self->format != NULL)
-    {
-        self->format(self, text, sizeof(text));
-    }
-    else
-    {
-        (void)snprintf(text, sizeof(text), "%s", self->label);
-    }
-
-    uint8_t selected = self->is_selected;
-    uint8_t editing_this = ((selected != 0U) && (hmi_editing != 0U)) ? 1U : 0U;
-
+    uint8_t editing_this = ((self->is_selected != 0U) && (hmi_editing != 0U)) ? 1U : 0U;
     uint16_t fill = editing_this ? HMI_SELECTED : HMI_BG;
-    uint16_t fg = editing_this ? HMI_FG : HMI_FG;
-    uint16_t border = selected ? HMI_SELECTED : HMI_DIM;
+    uint16_t border = self->is_selected ? HMI_SELECTED : HMI_DIM;
 
     ILI9341_fillRect(self->x, self->y, self->w, self->h, fill);
-
-    HMI_DrawRectBorder(self->x,
-                       self->y,
-                       self->w,
-                       self->h,
-                       border,
-                       HMI_FIELD_BORDER_THICKNESS);
-
-    HMI_PrintFixedWidth((uint16_t)(self->x + FIELD_TEXT_X_OFFSET),
-                        (uint16_t)(self->y + FIELD_TEXT_Y_OFFSET),
+    HMI_DrawRectBorder(self->x, self->y, self->w, self->h, border, HMI_FIELD_BORDER);
+    HMI_PrintFixedWidth((uint16_t)(self->x + FIELD_X_OFFSET),
+                        (uint16_t)(self->y + FIELD_Y_OFFSET),
                         text,
                         self->text_chars,
-                        fg,
+                        HMI_FG,
                         fill);
 }
 
@@ -979,15 +970,12 @@ static void HMI_FloatEntryEncoder(UiItem_t *self, int32_t steps)
     }
 
     HmiFloatEntry_t *entry = (HmiFloatEntry_t *)self->data;
-
     if (entry->value == NULL)
     {
         return;
     }
 
-    float value = *(entry->value);
-    value += ((float)steps * entry->step);
-
+    float value = *(entry->value) + ((float)steps * entry->step);
     if (value > entry->max_value)
     {
         value = entry->max_value;
@@ -996,134 +984,102 @@ static void HMI_FloatEntryEncoder(UiItem_t *self, int32_t steps)
     {
         value = entry->min_value;
     }
-    else
+
+    if (entry->apply != NULL)
     {
-        /* In range. */
-    }
-
-    *(entry->value) = value;
-}
-
-static void HMI_ReadoutRender(UiItem_t *self)
-{
-    char text[24];
-
-    if (self == NULL)
-    {
-        return;
-    }
-
-    if (self->format != NULL)
-    {
-        self->format(self, text, sizeof(text));
+        value = entry->apply(value);
     }
     else
     {
-        (void)snprintf(text, sizeof(text), "%s", self->label);
+        *(entry->value) = value;
     }
-
-    ILI9341_fillRect(self->x, self->y, self->w, self->h, HMI_BG);
-
-    HMI_PrintFixedWidth((uint16_t)(self->x + FIELD_TEXT_X_OFFSET),
-                        (uint16_t)(self->y + FIELD_TEXT_Y_OFFSET),
-                        text,
-                        self->text_chars,
-                        self->active_color,
-                        HMI_BG);
 }
 
 static void HMI_FormatInputSource(UiItem_t *self, char *dst, size_t dst_len)
 {
     (void)self;
-    (void)snprintf(dst, dst_len, "SRC:ENC");
+    (void)snprintf(dst, dst_len, "SRC:%s", Control_GetInputSourceName(control_input_source));
 }
 
-static void HMI_FormatPosFs(UiItem_t *self, char *dst, size_t dst_len)
+static void HMI_InputSelectRender(UiItem_t *self)
+{
+    char text[24];
+    self->format(self, text, sizeof(text));
+
+    uint8_t editing_this = ((self->is_selected != 0U) && (hmi_editing != 0U)) ? 1U : 0U;
+    uint16_t fill = editing_this ? HMI_SELECTED : HMI_BG;
+    uint16_t border = self->is_selected ? HMI_SELECTED : HMI_DIM;
+
+    ILI9341_fillRect(self->x, self->y, self->w, self->h, fill);
+    HMI_DrawRectBorder(self->x, self->y, self->w, self->h, border, HMI_FIELD_BORDER);
+    HMI_PrintFixedWidth((uint16_t)(self->x + FIELD_X_OFFSET),
+                        (uint16_t)(self->y + FIELD_Y_OFFSET),
+                        text,
+                        self->text_chars,
+                        HMI_FG,
+                        fill);
+}
+
+static void HMI_InputSelectPress(UiItem_t *self)
 {
     (void)self;
-
-    char rate[16];
-    HMI_RateToStr(rate, sizeof(rate), HMI_TimerRateHz(TIM6));
-    (void)snprintf(dst, dst_len, "Fs=%s", rate);
+    hmi_editing = hmi_editing ? 0U : 1U;
 }
 
-static void HMI_FormatVelFs(UiItem_t *self, char *dst, size_t dst_len)
+static void HMI_InputSelectEncoder(UiItem_t *self, int32_t steps)
 {
     (void)self;
-
-    char rate[16];
-    HMI_RateToStr(rate, sizeof(rate), HMI_TimerRateHz(TIM5));
-    (void)snprintf(dst, dst_len, "Fs=%s", rate);
-}
-
-static uint8_t HMI_FindNextSelectable(uint8_t start_index, int8_t direction)
-{
-    uint8_t index = start_index;
-
-    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
-    {
-        if (direction > 0)
-        {
-            index++;
-            if (index >= HMI_ITEM_COUNT)
-            {
-                index = 0U;
-            }
-        }
-        else
-        {
-            if (index == 0U)
-            {
-                index = (uint8_t)(HMI_ITEM_COUNT - 1U);
-            }
-            else
-            {
-                index--;
-            }
-        }
-
-        if (hmi_items[index].selectable != 0U)
-        {
-            return index;
-        }
-    }
-
-    return start_index;
-}
-
-static void HMI_MoveSelectionBySteps(int32_t steps)
-{
-    if (steps == 0)
+    if (hmi_editing == 0U)
     {
         return;
     }
 
-    uint8_t new_index = hmi_selected_index;
-
-    int8_t direction = (steps > 0) ? 1 : -1;
-    int32_t count = (steps > 0) ? steps : -steps;
-
-    while (count > 0)
+    ControlInputSource_t old_source = control_input_source;
+    while (steps > 0)
     {
-        new_index = HMI_FindNextSelectable(new_index, direction);
-        count--;
+        Control_NextInputSource(1);
+        steps--;
+    }
+    while (steps < 0)
+    {
+        Control_NextInputSource(-1);
+        steps++;
     }
 
-    HMI_SelectIndex(new_index);
+    if (old_source != control_input_source)
+    {
+        hmi_layout_dirty = 1U;
+    }
 }
+
+static void HMI_FormatPreset(UiItem_t *self, char *dst, size_t dst_len)
+{
+    (void)snprintf(dst, dst_len, "%s", self->label);
+}
+
+static void HMI_PresetButtonPress(UiItem_t *self);
 
 static void HMI_PressSelected(void)
 {
-    UiItem_t *selected = &hmi_items[hmi_selected_index];
+    if (hmi_selected_index >= HMI_ITEM_COUNT)
+    {
+        return;
+    }
 
+    UiItem_t *selected = &hmi_items[hmi_selected_index];
     if (selected->on_press != NULL)
     {
         selected->on_press(selected);
     }
 
-    if (selected->type == UI_ITEM_BUTTON)
+    if (hmi_page != HMI_PAGE_DIAGRAM)
     {
-        HMI_RenderModeButtons();
+        return;
+    }
+
+    if ((selected->type == UI_ITEM_BUTTON) || (selected->type == UI_ITEM_PRESET_BUTTON))
+    {
+        HMI_RenderTopItems();
     }
     else
     {
@@ -1139,11 +1095,13 @@ static void HMI_HandleEncoderSteps(int32_t steps)
     }
 
     UiItem_t *selected = &hmi_items[hmi_selected_index];
-
     if ((hmi_editing != 0U) && (selected->on_encoder != NULL))
     {
         selected->on_encoder(selected, steps);
-        HMI_RenderItem(hmi_selected_index);
+        if (hmi_layout_dirty == 0U)
+        {
+            HMI_RenderItem(hmi_selected_index);
+        }
     }
     else
     {
@@ -1153,67 +1111,446 @@ static void HMI_HandleEncoderSteps(int32_t steps)
 
 static void HMI_ProcessEncoder(void)
 {
-    int32_t current_count = HMI_Encoder_GetCount();
-    int32_t delta = current_count - hmi_last_encoder_count;
-
-    hmi_last_encoder_count = current_count;
-
-    if (hmi_tracking_lock != 0U)
+    if (Control_IsTrackingEnabled() != 0U)
     {
-        /*
-         * While TRACK is enabled, the physical HMI encoder belongs to the
-         * position setpoint path in control.c. Drain movement here so the UI
-         * does not build up a scroll backlog and does not leave TRACK selected.
-         */
-        hmi_encoder_accum = 0;
+        HMI_ResetEncoderAccumulator();
+        HMI_SelectIndex(HMI_INDEX_START);
         return;
     }
 
-    hmi_encoder_accum += delta;
-
-    int32_t steps = hmi_encoder_accum / HMI_ENCODER_COUNTS_PER_STEP;
-
-    if (steps != 0)
-    {
-        hmi_encoder_accum -= (steps * HMI_ENCODER_COUNTS_PER_STEP);
-        HMI_HandleEncoderSteps(steps);
-    }
+    int32_t steps = HMI_ConsumeEncoderSteps();
+    HMI_HandleEncoderSteps(steps);
 }
 
-static void HMI_ClearSelectionState(void)
+/* -------------------------------------------------------------------------- */
+/* Plot pages                                                                 */
+/* -------------------------------------------------------------------------- */
+
+static void HMI_DrawPlotBase(const char *title)
 {
-    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
-    {
-        hmi_items[i].is_selected = 0U;
-    }
+    ILI9341_setRotation(1U);
+    ILI9341_fillRect(0U, 0U, 320U, 240U, HMI_BG);
+    ILI9341_printString(6U, 8U, title, HMI_FG, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString(208U, 8U, "BTN=STOP", HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString(6U, 28U, "blue=target  red=measured", HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+
+    ILI9341_fillRect(HMI_PLOT_X, HMI_PLOT_Y, HMI_PLOT_W, HMI_PLOT_H, HMI_BG);
+    HMI_DrawRectBorder(HMI_PLOT_X, HMI_PLOT_Y, HMI_PLOT_W, HMI_PLOT_H, HMI_DIM, 1U);
 }
 
-static uint8_t HMI_FirstSelectableIndex(void)
+static void HMI_DrawAxisLabels(const char *x_label,
+                               const char *y_label,
+                               const char *top_label,
+                               const char *mid_label,
+                               const char *bottom_label)
 {
-    for (uint8_t i = 0U; i < HMI_ITEM_COUNT; i++)
+    ILI9341_printString(6U, (uint16_t)(HMI_PLOT_Y + 2U), top_label, HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString(10U, (uint16_t)(HMI_PLOT_Y + (HMI_PLOT_H / 2U) - 4U), mid_label, HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString(2U, (uint16_t)(HMI_PLOT_Y + HMI_PLOT_H - 8U), bottom_label, HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString((uint16_t)(HMI_PLOT_X + 2U), (uint16_t)(HMI_PLOT_Y - 12U), y_label, HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString((uint16_t)(HMI_PLOT_X + 92U), (uint16_t)(HMI_PLOT_Y + HMI_PLOT_H + 18U), x_label, HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+}
+
+static uint16_t HMI_TimeTickPixels(void)
+{
+    uint16_t tick_px = (uint16_t)(HMI_PLOT_TICK_MS / HMI_PLOT_REFRESH_MS);
+    return (tick_px == 0U) ? 1U : tick_px;
+}
+
+static uint16_t HMI_TimeMajorTickPixels(void)
+{
+    uint16_t major_px = (uint16_t)(HMI_PLOT_MAJOR_TICK_MS / HMI_PLOT_REFRESH_MS);
+    return (major_px == 0U) ? HMI_TimeTickPixels() : major_px;
+}
+
+static void HMI_DrawTimeTickAtOffset(uint16_t xoff)
+{
+    uint16_t tick_px = HMI_TimeTickPixels();
+    uint16_t major_px = HMI_TimeMajorTickPixels();
+
+    if ((xoff % tick_px) != 0U)
     {
-        if (hmi_items[i].selectable != 0U)
+        return;
+    }
+
+    uint16_t x = (uint16_t)(HMI_PLOT_X + 1U + xoff);
+    uint16_t bottom = (uint16_t)(HMI_PLOT_Y + HMI_PLOT_H - 2U);
+    uint16_t tick_h = ((xoff % major_px) == 0U) ? 8U : 4U;
+    HMI_DrawLine((int16_t)x, (int16_t)(bottom - tick_h), (int16_t)x, (int16_t)bottom, HMI_DIM);
+}
+
+static void HMI_DrawTimeTicks(void)
+{
+    uint16_t tick_px = HMI_TimeTickPixels();
+    uint16_t major_px = HMI_TimeMajorTickPixels();
+    uint16_t seconds = 0U;
+
+    for (uint16_t xoff = 0U; xoff < (HMI_PLOT_W - 2U); xoff = (uint16_t)(xoff + tick_px))
+    {
+        HMI_DrawTimeTickAtOffset(xoff);
+
+        if ((xoff % major_px) == 0U)
         {
-            return i;
+            char label[8];
+            uint16_t x = (uint16_t)(HMI_PLOT_X + 1U + xoff);
+            (void)snprintf(label, sizeof(label), "%us", (unsigned)seconds);
+            ILI9341_printString((uint16_t)(x - 4U),
+                                (uint16_t)(HMI_PLOT_Y + HMI_PLOT_H + 5U),
+                                label,
+                                HMI_DIM,
+                                HMI_BG,
+                                HMI_TEXT_SCALE);
         }
+        seconds = (uint16_t)(seconds + (HMI_PLOT_TICK_MS / 1000U));
+    }
+}
+
+static void HMI_ClearTimePlotGraphArea(float min_value, float max_value)
+{
+    ILI9341_fillRect((uint16_t)(HMI_PLOT_X + 1U),
+                     (uint16_t)(HMI_PLOT_Y + 1U),
+                     (uint16_t)(HMI_PLOT_W - 2U),
+                     (uint16_t)(HMI_PLOT_H - 2U),
+                     HMI_BG);
+
+    int16_t y_mid = HMI_MapY(0.0f, min_value, max_value);
+    HMI_DrawLine((int16_t)(HMI_PLOT_X + 1U), y_mid,
+                 (int16_t)(HMI_PLOT_X + HMI_PLOT_W - 2U), y_mid, HMI_DIM);
+    HMI_DrawTimeTicks();
+    hmi_plot_x = 0U;
+}
+
+static void HMI_DrawTimePlotFrame(void)
+{
+    char top[16];
+    char bottom[16];
+    float min_value;
+    float max_value;
+
+    if (desired_state == STATE_VELOCITY_CONTROL)
+    {
+        max_value = ctx_pos.output_range;
+        if (max_value < 1.0f)
+        {
+            max_value = CONTROL_DEFAULT_POS_RANGE_RPM;
+        }
+        min_value = -max_value;
+        HMI_FloatToStr(top, sizeof(top), max_value, 0U);
+        HMI_FloatToStr(bottom, sizeof(bottom), min_value, 0U);
+        HMI_DrawPlotBase("VELOCITY LIVE TIME PLOT");
+        HMI_DrawAxisLabels("Time (s)", "Velocity (RPM)", top, "0", bottom);
+    }
+    else
+    {
+        min_value = HMI_PLOT_POS_MIN_DEG;
+        max_value = HMI_PLOT_POS_MAX_DEG;
+        HMI_DrawPlotBase("POSITION LIVE TIME PLOT");
+        HMI_DrawAxisLabels("Time (s)", "Position (deg)", "180", "0", "-180");
     }
 
-    return HMI_INVALID_INDEX;
+    HMI_ClearTimePlotGraphArea(min_value, max_value);
 }
+
+static void HMI_UpdateTimePlot(void)
+{
+    float min_value;
+    float max_value;
+    float target;
+    float measured;
+
+    if (desired_state == STATE_VELOCITY_CONTROL)
+    {
+        max_value = ctx_pos.output_range;
+        if (max_value < 1.0f)
+        {
+            max_value = CONTROL_DEFAULT_POS_RANGE_RPM;
+        }
+        min_value = -max_value;
+        target = target_velocity1;
+        measured = measured_velocity1;
+    }
+    else
+    {
+        min_value = HMI_PLOT_POS_MIN_DEG;
+        max_value = HMI_PLOT_POS_MAX_DEG;
+        target = HMI_WrapDeg180(target_position1);
+        measured = HMI_WrapDeg180(encoder_measured_position1);
+    }
+
+    if (hmi_plot_x >= (HMI_PLOT_W - 2U))
+    {
+        HMI_ClearTimePlotGraphArea(min_value, max_value);
+    }
+
+    uint16_t xoff = hmi_plot_x;
+    uint16_t x = (uint16_t)(HMI_PLOT_X + 1U + xoff);
+    ILI9341_fillRect(x, (uint16_t)(HMI_PLOT_Y + 1U), 2U, (uint16_t)(HMI_PLOT_H - 2U), HMI_BG);
+    HMI_DrawTimeTickAtOffset(xoff);
+
+    int16_t y_mid = HMI_MapY(0.0f, min_value, max_value);
+    HMI_DrawPixel((int16_t)x, y_mid, HMI_DIM);
+
+    int16_t y_target = HMI_MapY(target, min_value, max_value);
+    int16_t y_meas = HMI_MapY(measured, min_value, max_value);
+    ILI9341_fillRect(x, (uint16_t)y_target, 2U, 2U, COLOR_BLUE);
+    ILI9341_fillRect(x, (uint16_t)y_meas, 2U, 2U, COLOR_RED);
+
+    hmi_plot_x++;
+}
+
+static void HMI_ShowPlotPage(void)
+{
+    hmi_page = HMI_PAGE_PLOT;
+    HMI_ResetEncoderAccumulator();
+    hmi_last_plot_refresh_ms = HAL_GetTick();
+    HMI_DrawTimePlotFrame();
+}
+
+static void HMI_StopAndReturnFromPlot(void)
+{
+    Control_ExitTracking();
+    hmi_tracking_lock = 0U;
+    HMI_RedrawFullDiagramPage();
+}
+
+static void HMI_PlotTask(void)
+{
+    if (Button_WasPressed() != 0U)
+    {
+        HMI_StopAndReturnFromPlot();
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+    if ((now - hmi_last_plot_refresh_ms) >= HMI_PLOT_REFRESH_MS)
+    {
+        hmi_last_plot_refresh_ms = now;
+        HMI_UpdateTimePlot();
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Preset mini menu                                                           */
+/* -------------------------------------------------------------------------- */
+
+#define PRESET_MENU_COUNT             7U
+#define PRESET_ITEM_POS_KP            0U
+#define PRESET_ITEM_POS_KI            1U
+#define PRESET_ITEM_VEL_KP            2U
+#define PRESET_ITEM_VEL_KI            3U
+#define PRESET_ITEM_SAVE_CUR          4U
+#define PRESET_ITEM_APPLY             5U
+#define PRESET_ITEM_BACK              6U
+#define PRESET_MENU_X                 34U
+#define PRESET_MENU_Y                 42U
+#define PRESET_MENU_W                 252U
+#define PRESET_ROW_H                  20U
+#define PRESET_ROW_GAP                3U
+
+static float HMI_PresetClamp(uint8_t field, float value)
+{
+    float max_value = ((field == PRESET_ITEM_POS_KP) || (field == PRESET_ITEM_VEL_KP)) ? HMI_FLOAT_MAX_KP : HMI_FLOAT_MAX_KI;
+    if (value < 0.0f)
+    {
+        value = 0.0f;
+    }
+    else if (value > max_value)
+    {
+        value = max_value;
+    }
+    return value;
+}
+
+static float HMI_GetPresetField(ControlPreset_t preset, uint8_t field)
+{
+    switch (field)
+    {
+        case PRESET_ITEM_POS_KP: return preset.pos_kp;
+        case PRESET_ITEM_POS_KI: return preset.pos_ki;
+        case PRESET_ITEM_VEL_KP: return preset.vel_kp;
+        case PRESET_ITEM_VEL_KI: return preset.vel_ki;
+        default: return 0.0f;
+    }
+}
+
+static const char *HMI_GetPresetFieldName(uint8_t field)
+{
+    switch (field)
+    {
+        case PRESET_ITEM_POS_KP: return "POS Kp";
+        case PRESET_ITEM_POS_KI: return "POS Ki";
+        case PRESET_ITEM_VEL_KP: return "VEL Kp";
+        case PRESET_ITEM_VEL_KI: return "VEL Ki";
+        case PRESET_ITEM_SAVE_CUR: return "SAVE CUR";
+        case PRESET_ITEM_APPLY: return "APPLY";
+        case PRESET_ITEM_BACK: return "BACK";
+        default: return "?";
+    }
+}
+
+static void HMI_RenderPresetRow(uint8_t row)
+{
+    char value_text[16];
+    char row_text[32];
+    uint16_t y = (uint16_t)(PRESET_MENU_Y + ((uint16_t)row * (PRESET_ROW_H + PRESET_ROW_GAP)));
+    uint8_t selected = (row == hmi_preset_selected) ? 1U : 0U;
+    uint8_t editing = ((selected != 0U) && (hmi_preset_editing != 0U)) ? 1U : 0U;
+    uint16_t fill = editing ? HMI_SELECTED : HMI_BG;
+    uint16_t border = selected ? HMI_SELECTED : HMI_DIM;
+
+    ILI9341_fillRect(PRESET_MENU_X, y, PRESET_MENU_W, PRESET_ROW_H, fill);
+    HMI_DrawRectBorder(PRESET_MENU_X, y, PRESET_MENU_W, PRESET_ROW_H, border, 1U);
+
+    if (row <= PRESET_ITEM_VEL_KI)
+    {
+        ControlPreset_t preset = Control_GetPreset(hmi_preset_slot);
+        HMI_FloatToStr(value_text, sizeof(value_text), HMI_GetPresetField(preset, row), 2U);
+        (void)snprintf(row_text, sizeof(row_text), "%s = %s", HMI_GetPresetFieldName(row), value_text);
+    }
+    else
+    {
+        (void)snprintf(row_text, sizeof(row_text), "%s", HMI_GetPresetFieldName(row));
+    }
+
+    ILI9341_printString((uint16_t)(PRESET_MENU_X + 7U),
+                        (uint16_t)(y + 6U),
+                        row_text,
+                        HMI_FG,
+                        fill,
+                        HMI_TEXT_SCALE);
+}
+
+static void HMI_DrawPresetMenu(void)
+{
+    char title[32];
+    ILI9341_setRotation(1U);
+    ILI9341_fillRect(0U, 0U, 320U, 240U, HMI_BG);
+    (void)snprintf(title, sizeof(title), "PRESET %u CONFIG", (unsigned)(hmi_preset_slot + 1U));
+    ILI9341_printString(6U, 8U, title, HMI_FG, HMI_BG, HMI_TEXT_SCALE);
+    ILI9341_printString(6U, 24U, "Edit fields, SAVE CUR, APPLY, or BACK", HMI_DIM, HMI_BG, HMI_TEXT_SCALE);
+
+    for (uint8_t i = 0U; i < PRESET_MENU_COUNT; i++)
+    {
+        HMI_RenderPresetRow(i);
+    }
+}
+
+static void HMI_OpenPresetMenu(uint8_t slot)
+{
+    if (slot >= CONTROL_PRESET_COUNT)
+    {
+        return;
+    }
+
+    hmi_page = HMI_PAGE_PRESET;
+    hmi_preset_slot = slot;
+    hmi_preset_selected = 0U;
+    hmi_preset_editing = 0U;
+    hmi_editing = 0U;
+    HMI_ResetEncoderAccumulator();
+    HMI_DrawPresetMenu();
+}
+
+static void HMI_PresetButtonPress(UiItem_t *self)
+{
+    uint8_t slot = (self == &hmi_items[HMI_INDEX_PRESET2]) ? 1U : 0U;
+    HMI_OpenPresetMenu(slot);
+}
+
+static void HMI_ProcessPresetEncoder(void)
+{
+    int32_t steps = HMI_ConsumeEncoderSteps();
+    if (steps == 0)
+    {
+        return;
+    }
+
+    if ((hmi_preset_editing != 0U) && (hmi_preset_selected <= PRESET_ITEM_VEL_KI))
+    {
+        ControlPreset_t preset = Control_GetPreset(hmi_preset_slot);
+        float value = HMI_GetPresetField(preset, hmi_preset_selected);
+        value += ((float)steps * HMI_FLOAT_STEP_GAIN);
+        value = HMI_PresetClamp(hmi_preset_selected, value);
+        Control_SetPresetValue(hmi_preset_slot, hmi_preset_selected, value);
+        HMI_RenderPresetRow(hmi_preset_selected);
+        return;
+    }
+
+    uint8_t old = hmi_preset_selected;
+    while (steps > 0)
+    {
+        hmi_preset_selected++;
+        if (hmi_preset_selected >= PRESET_MENU_COUNT)
+        {
+            hmi_preset_selected = 0U;
+        }
+        steps--;
+    }
+    while (steps < 0)
+    {
+        if (hmi_preset_selected == 0U)
+        {
+            hmi_preset_selected = PRESET_MENU_COUNT - 1U;
+        }
+        else
+        {
+            hmi_preset_selected--;
+        }
+        steps++;
+    }
+
+    HMI_RenderPresetRow(old);
+    HMI_RenderPresetRow(hmi_preset_selected);
+}
+
+static void HMI_PresetPressSelected(void)
+{
+    if (hmi_preset_selected <= PRESET_ITEM_VEL_KI)
+    {
+        hmi_preset_editing = hmi_preset_editing ? 0U : 1U;
+        HMI_RenderPresetRow(hmi_preset_selected);
+    }
+    else if (hmi_preset_selected == PRESET_ITEM_SAVE_CUR)
+    {
+        Control_SavePreset(hmi_preset_slot);
+        HMI_DrawPresetMenu();
+    }
+    else if (hmi_preset_selected == PRESET_ITEM_APPLY)
+    {
+        Control_LoadPreset(hmi_preset_slot);
+        HMI_DrawPresetMenu();
+    }
+    else if (hmi_preset_selected == PRESET_ITEM_BACK)
+    {
+        HMI_RedrawFullDiagramPage();
+    }
+}
+
+static void HMI_PresetTask(void)
+{
+    HMI_ProcessPresetEncoder();
+    if (Button_WasPressed() != 0U)
+    {
+        HMI_PresetPressSelected();
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public UI API                                                              */
+/* -------------------------------------------------------------------------- */
 
 void UI_Init(void)
 {
-    /* The control-loop display uses rotation 1. Keep the same coordinate frame. */
     ILI9341_setRotation(1U);
-
-    hmi_last_encoder_count = HMI_Encoder_GetCount();
-    hmi_encoder_accum = 0;
+    hmi_page = HMI_PAGE_DIAGRAM;
     hmi_editing = 0U;
     hmi_tracking_lock = 0U;
+    hmi_layout_dirty = 0U;
     hmi_last_value_refresh_ms = HAL_GetTick();
+    hmi_last_plot_refresh_ms = HAL_GetTick();
 
+    HMI_ResetEncoderAccumulator();
     HMI_ClearSelectionState();
-
     hmi_selected_index = HMI_FirstSelectableIndex();
     if (hmi_selected_index != HMI_INVALID_INDEX)
     {
@@ -1230,24 +1567,44 @@ void UI_Init(void)
 
 void UI_Task(void)
 {
-    HMI_SyncTrackingLock();
-    HMI_ProcessEncoder();
+    if (hmi_page == HMI_PAGE_PLOT)
+    {
+        HMI_PlotTask();
+        return;
+    }
+
+    if (hmi_page == HMI_PAGE_PRESET)
+    {
+        HMI_PresetTask();
+        return;
+    }
 
     if (HMI_SyncButtonStates() != 0U)
     {
-        HMI_RenderModeButtons();
+        HMI_RenderTopItems();
+    }
+
+    HMI_ProcessEncoder();
+
+    if (hmi_layout_dirty != 0U)
+    {
+        HMI_RedrawDiagramAreaOnly();
     }
 
     if (Button_WasPressed() != 0U)
     {
         HMI_PressSelected();
+        if (hmi_page != HMI_PAGE_DIAGRAM)
+        {
+            return;
+        }
     }
 
     uint32_t now = HAL_GetTick();
     if ((now - hmi_last_value_refresh_ms) >= HMI_VALUE_REFRESH_MS)
     {
         hmi_last_value_refresh_ms = now;
-        HMI_RenderReadouts();
+        HMI_RenderDiagramItems();
     }
 }
 
@@ -1258,15 +1615,12 @@ void UI_Update(UiEvent_t event)
         case UI_EVENT_UP:
             HMI_HandleEncoderSteps(-1);
             break;
-
         case UI_EVENT_DOWN:
             HMI_HandleEncoderSteps(1);
             break;
-
         case UI_EVENT_SELECT:
             HMI_PressSelected();
             break;
-
         case UI_EVENT_NONE:
         default:
             break;
@@ -1275,5 +1629,16 @@ void UI_Update(UiEvent_t event)
 
 void UI_Draw(void)
 {
-    HMI_RenderAllItems();
+    if (hmi_page == HMI_PAGE_DIAGRAM)
+    {
+        HMI_RenderAllItems();
+    }
+    else if (hmi_page == HMI_PAGE_PLOT)
+    {
+        HMI_DrawTimePlotFrame();
+    }
+    else
+    {
+        HMI_DrawPresetMenu();
+    }
 }

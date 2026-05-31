@@ -30,6 +30,8 @@ extern "C" {
 #include "stm32l4xx_hal.h"
 #include "control.h"
 #include "encoder.h"
+#include "motor.h"
+#include "ADC.h"
 #include "HMI.h"
 #include "ILI9341.h"
 #include "ILI9341_text.h"
