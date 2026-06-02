@@ -246,7 +246,7 @@ static float Encoder_RpmFromWindow(int32_t delta_counts, uint32_t elapsed_us)
     float rpm = ((float)delta_counts * 60.0f * 1000000.0f) /
                 ((float)ENCODER_RPM_COUNTS_PER_REV * (float)elapsed_us);
 
-    float max_valid = ENCODER_MAX_MOTOR_RPM * ENCODER_RPM_GLITCH_MARGIN;
+    float max_valid = ENCODER_MAX_REPORTED_RPM * ENCODER_RPM_GLITCH_MARGIN;
     return Encoder_ClampF(rpm, -max_valid, max_valid);
 }
 
