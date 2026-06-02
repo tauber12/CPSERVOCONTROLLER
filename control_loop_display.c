@@ -1,27 +1,18 @@
 /*
  * control_loop_display.c
  *
- * Static landscape ILI9341 control-loop diagram.
- *
- * This file now owns only the non-interactive drawing:
- *   - screen rotation/background
- *   - mode-select title/top band
- *   - control-loop blocks
- *   - arrows, summing junctions, feedback paths
- *
- * Interactive objects are intentionally not drawn here anymore. Buttons,
- * editable gains, and live numeric readouts are rendered by HMI.c as UI items.
+ * Static landscape ILI9341 control-loop diagram. HMI.c draws all interactive
+ * buttons and editable values on top of this background.
  */
 
 #include "control_loop_display.h"
 
 #include <stdint.h>
-
-#include "stm32l4xx_hal.h"
 #include "ILI9341_text.h"
 
 #define CLD_W                  320U
 #define CLD_H                  240U
+#define CLD_TOP_H              47U
 
 #define CLD_BG                 COLOR_WHITE
 #define CLD_FG                 COLOR_BLACK
@@ -36,13 +27,8 @@
 #define CLD_LINE_THICK         2U
 #define CLD_SUM_R              8U
 
-/* Landscape 320 x 240 layout. These dimensions match the HMI item layout. */
 #define MODE_TITLE_X           5U
 #define MODE_TITLE_Y           3U
-
-#define BYPASS_Y               62U
-#define BYPASS_TEXT_X          73U
-#define BYPASS_TEXT_Y          51U
 
 #define BLOCK_Y                84U
 #define BLOCK_H                70U
@@ -66,6 +52,8 @@
 #define VEL_FB_Y               178U
 #define POS_FB_Y               216U
 
+static Controller_State cld_last_mode = STATE_POSITION_CONTROL;
+
 static void CLD_SwapU16(uint16_t *a, uint16_t *b)
 {
     uint16_t t = *a;
@@ -76,18 +64,15 @@ static void CLD_SwapU16(uint16_t *a, uint16_t *b)
 static uint16_t CLD_TextWidth(const char *s)
 {
     uint16_t n = 0U;
-
     if (s == 0)
     {
         return 0U;
     }
-
     while (*s != '\0')
     {
         n++;
         s++;
     }
-
     return (uint16_t)(n * CLD_CHAR_W * CLD_TEXT_SCALE);
 }
 
@@ -97,7 +82,6 @@ static void CLD_HLine(uint16_t x0, uint16_t x1, uint16_t y, uint16_t color)
     {
         CLD_SwapU16(&x0, &x1);
     }
-
     ILI9341_fillRect(x0, y, (uint16_t)(x1 - x0 + 1U), CLD_LINE_THICK, color);
 }
 
@@ -107,7 +91,6 @@ static void CLD_VLine(uint16_t x, uint16_t y0, uint16_t y1, uint16_t color)
     {
         CLD_SwapU16(&y0, &y1);
     }
-
     ILI9341_fillRect(x, y0, CLD_LINE_THICK, (uint16_t)(y1 - y0 + 1U), color);
 }
 
@@ -117,7 +100,6 @@ static void CLD_DrawPixel(int16_t x, int16_t y, uint16_t color)
     {
         return;
     }
-
     ILI9341_fillRect((uint16_t)x, (uint16_t)y, 1U, 1U, color);
 }
 
@@ -128,7 +110,6 @@ static void CLD_DrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_
         CLD_HLine((uint16_t)x0, (uint16_t)x1, (uint16_t)y0, color);
         return;
     }
-
     if (x0 == x1)
     {
         CLD_VLine((uint16_t)x0, (uint16_t)y0, (uint16_t)y1, color);
@@ -148,7 +129,6 @@ static void CLD_DrawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint16_
         {
             break;
         }
-
         int16_t e2 = (int16_t)(2 * err);
         if (e2 >= dy)
         {
@@ -182,13 +162,7 @@ static void CLD_PrintCentered(uint16_t x, uint16_t y, uint16_t w,
                               const char *text, uint16_t fg, uint16_t bg)
 {
     uint16_t tw = CLD_TextWidth(text);
-    uint16_t tx = x;
-
-    if (tw < w)
-    {
-        tx = (uint16_t)(x + ((w - tw) / 2U));
-    }
-
+    uint16_t tx = (tw < w) ? (uint16_t)(x + ((w - tw) / 2U)) : x;
     ILI9341_printString(tx, y, text, fg, bg, CLD_TEXT_SCALE);
 }
 
@@ -197,7 +171,6 @@ static void CLD_Block(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 {
     CLD_FillAndBorder(x, y, w, h, CLD_BG, border);
     CLD_PrintCentered(x, (uint16_t)(y + 5U), w, line0, border, CLD_BG);
-
     if (line1 != 0)
     {
         CLD_PrintCentered(x, (uint16_t)(y + 16U), w, line1, border, CLD_BG);
@@ -209,7 +182,6 @@ static void CLD_Circle(int16_t xc, int16_t yc, int16_t r, uint16_t color)
     int16_t x = 0;
     int16_t y = r;
     int16_t d = (int16_t)(3 - 2 * r);
-
     while (y >= x)
     {
         CLD_DrawPixel((int16_t)(xc + x), (int16_t)(yc + y), color);
@@ -220,7 +192,6 @@ static void CLD_Circle(int16_t xc, int16_t yc, int16_t r, uint16_t color)
         CLD_DrawPixel((int16_t)(xc - y), (int16_t)(yc + x), color);
         CLD_DrawPixel((int16_t)(xc + y), (int16_t)(yc - x), color);
         CLD_DrawPixel((int16_t)(xc - y), (int16_t)(yc - x), color);
-
         x++;
         if (d > 0)
         {
@@ -258,7 +229,6 @@ static void CLD_ArrowH(uint16_t x0, uint16_t x1, uint16_t y, uint16_t color)
     {
         return;
     }
-
     CLD_HLine(x0, (uint16_t)(x1 - 1U), y, color);
     CLD_ArrowHeadRight(x1, y, color);
 }
@@ -284,61 +254,51 @@ static void CLD_DrawSum(uint16_t cx, uint16_t cy, uint16_t color)
 
 static void CLD_DrawStaticModeArea(void)
 {
-    /* This band is only the frame/title. The actual mode buttons are HMI items. */
-    CLD_FillAndBorder(0U, 0U, CLD_W, 47U, CLD_BG, CLD_DIM);
-    ILI9341_printString(MODE_TITLE_X,
-                        MODE_TITLE_Y,
-                        "MODE SELECT",
-                        CLD_FG,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
+    CLD_FillAndBorder(0U, 0U, CLD_W, CLD_TOP_H, CLD_BG, CLD_DIM);
+    ILI9341_printString(MODE_TITLE_X, MODE_TITLE_Y, "MODE / PRESETS", CLD_FG, CLD_BG, CLD_TEXT_SCALE);
 }
 
-static void CLD_DrawStaticBypass(void)
-{
-    const uint16_t bypass_end_y = (uint16_t)(PATH_Y - CLD_SUM_R - 2U);
-
-    ILI9341_printString(BYPASS_TEXT_X,
-                        BYPASS_TEXT_Y,
-                        "VEL MODE BYPASS",
-                        CLD_DIM,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
-
-    CLD_HLine((uint16_t)(INPUT_X + INPUT_W), SUM_VEL_X, BYPASS_Y, CLD_DIM);
-    CLD_ArrowDown(SUM_VEL_X, BYPASS_Y, bypass_end_y, CLD_DIM);
-}
-
-static void CLD_DrawStaticDiagram(void)
+static void CLD_DrawPlantAndEncoder(void)
 {
     const uint16_t plant_center_x = (uint16_t)(PLANT_X + (PLANT_W / 2U));
+
+    CLD_Block(PLANT_X, BLOCK_Y, PLANT_W, BLOCK_H, CLD_PLANT, "PWM", "MOTOR");
+    ILI9341_printString((uint16_t)(PLANT_X + 15U), (uint16_t)(BLOCK_Y + 27U), "LOAD", CLD_FG, CLD_BG, CLD_TEXT_SCALE);
+    ILI9341_printString((uint16_t)(PLANT_X + 7U), (uint16_t)(BLOCK_Y + 41U), "TIM1", CLD_FG, CLD_BG, CLD_TEXT_SCALE);
+    ILI9341_printString((uint16_t)(PLANT_X + 6U), (uint16_t)(BLOCK_Y + 53U), "20kHz", CLD_FG, CLD_BG, CLD_TEXT_SCALE);
+
+    CLD_FillAndBorder(ENC_X, ENC_Y, ENC_W, ENC_H, CLD_BG, CLD_DIM);
+    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 4U), ENC_W, "ENC", CLD_FG, CLD_BG);
+    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 15U), ENC_W, "POS/VEL", CLD_FG, CLD_BG);
+    CLD_ArrowDown(plant_center_x, (uint16_t)(BLOCK_Y + BLOCK_H), (uint16_t)(ENC_Y - 1U), CLD_FG);
+}
+
+static void CLD_DrawStaticDiagramForMode(Controller_State mode)
+{
     const uint16_t enc_center_x = (uint16_t)(ENC_X + (ENC_W / 2U));
 
-    CLD_Block(INPUT_X, BLOCK_Y, INPUT_W, BLOCK_H, CLD_IN, "INPUT", "SELECT");
+    CLD_Block(INPUT_X, BLOCK_Y, INPUT_W, BLOCK_H, CLD_IN, "INPUT", "MUX");
+    ILI9341_printString((uint16_t)(INPUT_X + 10U), (uint16_t)(BLOCK_Y + 53U), "USER", CLD_IN, CLD_BG, CLD_TEXT_SCALE);
+
+    if (mode == STATE_VELOCITY_CONTROL)
+    {
+        CLD_Block(VEL_X, BLOCK_Y, VEL_W, BLOCK_H, CLD_VEL, "VELOCITY", "PI");
+        CLD_DrawPlantAndEncoder();
+
+        CLD_ArrowH((uint16_t)(INPUT_X + INPUT_W), (uint16_t)(SUM_VEL_X - CLD_SUM_R), PATH_Y, CLD_IN);
+        CLD_ArrowH((uint16_t)(SUM_VEL_X + CLD_SUM_R), VEL_X, PATH_Y, CLD_VEL);
+        CLD_ArrowH((uint16_t)(VEL_X + VEL_W), PLANT_X, PATH_Y, CLD_PLANT);
+        CLD_DrawSum(SUM_VEL_X, PATH_Y, CLD_VEL);
+
+        CLD_HLine(SUM_VEL_X, ENC_X, VEL_FB_Y, CLD_VEL);
+        CLD_ArrowUp(SUM_VEL_X, VEL_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_VEL);
+        ILI9341_printString(190U, (uint16_t)(VEL_FB_Y + 5U), "velocity fb", CLD_VEL, CLD_BG, CLD_TEXT_SCALE);
+        return;
+    }
+
     CLD_Block(POS_X, BLOCK_Y, POS_W, BLOCK_H, CLD_POS, "POSITION", "PI");
     CLD_Block(VEL_X, BLOCK_Y, VEL_W, BLOCK_H, CLD_VEL, "VELOCITY", "PI");
-    CLD_Block(PLANT_X, BLOCK_Y, PLANT_W, BLOCK_H, CLD_PLANT, "PWM", "MOTOR");
-
-    ILI9341_printString((uint16_t)(PLANT_X + 15U),
-                        (uint16_t)(BLOCK_Y + 27U),
-                        "LOAD",
-                        CLD_FG,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
-    ILI9341_printString((uint16_t)(PLANT_X + 7U),
-                        (uint16_t)(BLOCK_Y + 41U),
-                        "TIM1",
-                        CLD_FG,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
-    ILI9341_printString((uint16_t)(PLANT_X + 6U),
-                        (uint16_t)(BLOCK_Y + 53U),
-                        "20kHz",
-                        CLD_FG,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
-
-    CLD_DrawStaticBypass();
+    CLD_DrawPlantAndEncoder();
 
     CLD_ArrowH((uint16_t)(INPUT_X + INPUT_W), (uint16_t)(SUM_POS_X - CLD_SUM_R), PATH_Y, CLD_IN);
     CLD_ArrowH((uint16_t)(SUM_POS_X + CLD_SUM_R), POS_X, PATH_Y, CLD_POS);
@@ -349,39 +309,46 @@ static void CLD_DrawStaticDiagram(void)
     CLD_DrawSum(SUM_POS_X, PATH_Y, CLD_POS);
     CLD_DrawSum(SUM_VEL_X, PATH_Y, CLD_VEL);
 
-    CLD_FillAndBorder(ENC_X, ENC_Y, ENC_W, ENC_H, CLD_BG, CLD_DIM);
-    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 4U), ENC_W, "ENC", CLD_FG, CLD_BG);
-    CLD_PrintCentered(ENC_X, (uint16_t)(ENC_Y + 15U), ENC_W, "POS/VEL", CLD_FG, CLD_BG);
-
-    CLD_ArrowDown(plant_center_x, (uint16_t)(BLOCK_Y + BLOCK_H), (uint16_t)(ENC_Y - 1U), CLD_FG);
-
-    /* Velocity feedback to velocity summing junction. */
     CLD_HLine(SUM_VEL_X, ENC_X, VEL_FB_Y, CLD_VEL);
     CLD_ArrowUp(SUM_VEL_X, VEL_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_VEL);
-    ILI9341_printString(190U,
-                        (uint16_t)(VEL_FB_Y + 5U),
-                        "velocity fb",
-                        CLD_VEL,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
+    ILI9341_printString(190U, (uint16_t)(VEL_FB_Y + 5U), "velocity fb", CLD_VEL, CLD_BG, CLD_TEXT_SCALE);
 
-    /* Position feedback to position summing junction. */
     CLD_VLine(enc_center_x, (uint16_t)(ENC_Y + ENC_H), POS_FB_Y, CLD_POS);
     CLD_HLine(SUM_POS_X, enc_center_x, POS_FB_Y, CLD_POS);
     CLD_ArrowUp(SUM_POS_X, POS_FB_Y, (uint16_t)(PATH_Y + CLD_SUM_R + 2U), CLD_POS);
-    ILI9341_printString(111U,
-                        (uint16_t)(POS_FB_Y + 5U),
-                        "position fb",
-                        CLD_POS,
-                        CLD_BG,
-                        CLD_TEXT_SCALE);
+    ILI9341_printString(111U, (uint16_t)(POS_FB_Y + 5U), "position fb", CLD_POS, CLD_BG, CLD_TEXT_SCALE);
+}
+
+void ControlLoopDisplay_DrawDiagramOnlyForMode(Controller_State mode)
+{
+    if ((mode != STATE_POSITION_CONTROL) && (mode != STATE_VELOCITY_CONTROL))
+    {
+        mode = STATE_POSITION_CONTROL;
+    }
+
+    cld_last_mode = mode;
+    ILI9341_setRotation(1U);
+    ILI9341_fillRect(0U, CLD_TOP_H, CLD_W, (uint16_t)(CLD_H - CLD_TOP_H), CLD_BG);
+    CLD_DrawStaticDiagramForMode(mode);
+}
+
+void ControlLoopDisplay_DrawForMode(Controller_State mode)
+{
+    if ((mode != STATE_POSITION_CONTROL) && (mode != STATE_VELOCITY_CONTROL))
+    {
+        mode = STATE_POSITION_CONTROL;
+    }
+
+    cld_last_mode = mode;
+    ILI9341_setRotation(1U);
+    ILI9341_fillRect(0U, 0U, CLD_W, CLD_H, CLD_BG);
+    CLD_DrawStaticModeArea();
+    CLD_DrawStaticDiagramForMode(mode);
 }
 
 void ControlLoopDisplay_Init(void)
 {
-    /* 1 = landscape, 320 x 240, in the rotation-aware text driver. */
-    ILI9341_setRotation(1U);
-    ControlLoopDisplay_DrawStatic();
+    ControlLoopDisplay_DrawForMode(cld_last_mode);
 }
 
 void ControlLoopDisplay_Draw(void)
@@ -391,15 +358,10 @@ void ControlLoopDisplay_Draw(void)
 
 void ControlLoopDisplay_DrawStatic(void)
 {
-    ILI9341_fillScreen(CLD_BG);
-    CLD_DrawStaticModeArea();
-    CLD_DrawStaticDiagram();
+    ControlLoopDisplay_DrawForMode(cld_last_mode);
 }
 
 void ControlLoopDisplay_Update(void)
 {
-    /*
-     * No dynamic UI is drawn here anymore.
-     * HMI.c owns all buttons, editable entries, and live numeric readouts.
-     */
+    /* Dynamic UI is owned by HMI.c. */
 }

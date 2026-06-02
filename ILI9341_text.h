@@ -50,6 +50,9 @@
  * Function prototypes
  * -------------------------------------------------------------------------- */
 
+// Set display rotation / coordinate mapping
+void ILI9341_setRotation(uint8_t rotation);
+
 // Set the active pixel write window on the display
 void ILI9341_setAddressWindow(uint16_t x0, uint16_t y0,
                                uint16_t x1, uint16_t y1);
