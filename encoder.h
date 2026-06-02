@@ -1,33 +1,68 @@
 /*
  *******************************************************************************
  * @file           : encoder.h
- * @brief          : Quadrature encoder driver with M/T velocity estimation
- * project         : EE 329 S'26 AX
- * version         : 0.2
- * date            : May 23, 2026
+ * @brief          : Quadrature encoder driver with adaptive-window RPM estimate
  *******************************************************************************
  */
 
 #ifndef INC_ENCODER_H_
 #define INC_ENCODER_H_
 
-#include "stm32l4xx_hal.h"
 #include <stdint.h>
+#include "stm32l4xx_hal.h"
 
-/* Must match TIM5 ARR configuration in control.c */
-#define CONTROL_LOOP_HZ 5000.0f
+/* -------------------------------------------------------------------------- */
+/* Motor encoder/mechanics configuration                                      */
+/* -------------------------------------------------------------------------- */
 
-#define PPR                 7
-#define GEAR_RATIO          150
-#define COUNTS_PER_REV      (PPR * GEAR_RATIO * 4)   // 4,200
+#define ENCODER_DEFAULT_SAMPLE_HZ          5000.0f
+
+/* New motor: 220 PPR encoder and 20:1 gearbox. TIM2 decodes quadrature x4. */
+#define ENCODER_PPR                        220.0f
+#define ENCODER_GEAR_RATIO                 20.0f
+#define ENCODER_X4_COUNTS_PER_PULSE        4.0f
+
+#define ENCODER_COUNTS_PER_MOTOR_REV       (ENCODER_PPR * ENCODER_X4_COUNTS_PER_PULSE)
+#define ENCODER_COUNTS_PER_OUTPUT_REV      (ENCODER_COUNTS_PER_MOTOR_REV * ENCODER_GEAR_RATIO)
+
+/* Position is still reported at the gearbox output shaft. */
+#define COUNTS_PER_REV                     ENCODER_COUNTS_PER_OUTPUT_REV
+
+/* Velocity mode generally wants motor RPM. Set this to 0 to report output RPM. */
+#define ENCODER_REPORT_MOTOR_RPM           1U
+#if ENCODER_REPORT_MOTOR_RPM
+#define ENCODER_RPM_COUNTS_PER_REV         ENCODER_COUNTS_PER_MOTOR_REV
+#else
+#define ENCODER_RPM_COUNTS_PER_REV         ENCODER_COUNTS_PER_OUTPUT_REV
+#endif
+
+/* Adaptive RPM-estimator tuning. The estimator waits for enough counts or for
+ * the max window time, whichever happens first. This avoids the sign jitter and
+ * +/- spikes that occur when a 1-sample delta rounds between 0 and 1 count. */
+#define ENCODER_RPM_MIN_WINDOW_US          2500UL
+#define ENCODER_RPM_MAX_WINDOW_US          80000UL
+#define ENCODER_RPM_MIN_UPDATE_COUNTS      8L
+#define ENCODER_RPM_STALL_TIMEOUT_US       160000UL
+#define ENCODER_MAX_MOTOR_RPM              1200.0f
+#define ENCODER_RPM_GLITCH_MARGIN          1.75f
+#define ENCODER_RPM_FILTER_ALPHA_LOW       0.08f
+#define ENCODER_RPM_FILTER_ALPHA_HIGH      0.22f
+#define ENCODER_RPM_LOW_FILTER_THRESHOLD   60.0f
+#define ENCODER_ZERO_RPM_DEADBAND          0.35f
+#define ENCODER_RPM_SIGN_HYSTERESIS        5.0f
 
 void    Encoder_Config(void);
-void    Encoder_RecordEdge(void);       // called from EXTI0 ISR (in encoder.c)
+void    Encoder_RecordEdge(void);
+void    Encoder_ResetCount(void);
+
+void    Encoder_SetSampleRateHz(float sample_rate_hz);
+float   Encoder_GetSampleRateHz(void);
+float   Encoder_GetLowRpmThreshold(void);
 
 int32_t Encoder_GetCount(void);
 float   Encoder_GetRevolutions(void);
 float   Encoder_GetDegrees(void);
-float   Encoder_GetVelocityRPM(void);  // M/T blended
-float   Encoder_GetVelocityCPS(void);  // M-method only, for diagnostics
+float   Encoder_GetVelocityRPM(void);
+float   Encoder_GetVelocityCPS(void);
 
 #endif /* INC_ENCODER_H_ */
