@@ -13,41 +13,12 @@ void interrupt_Priorities( void ){
 	NVIC_SetPriority(TIM5_IRQn,        1);  // velocity loop  — 5 kHz
 	NVIC_SetPriority(TIM6_DAC_IRQn,    2);  // position loop  — 500 Hz
 
-	NVIC_SetPriority(TIM3_IRQn,        3);  // µs timebase
+	NVIC_SetPriority(TIM3_IRQn,        3);  // extended us timebase
 	NVIC_SetPriority(ADC1_2_IRQn,      4);  // ADC conversion complete
-
-
-   NVIC_SetPriority(TIM7_IRQn,        5);  // Button Poll
+	NVIC_SetPriority(TIM4_IRQn,        5);  // HMI encoder overflow
+	NVIC_SetPriority(TIM7_IRQn,        6);  // Button Poll
 
 }
-
-typedef enum {
-    CLR_BLACK = 0,
-    CLR_WHITE,
-    CLR_RED,
-    CLR_GREEN,
-    CLR_BLUE,
-    CLR_YELLOW,
-    CLR_CYAN,
-    CLR_MAGENTA,
-    CLR_ORANGE,
-    CLR_GRAY,
-    CLR_COUNT
-} ColorIndex_t;
-
-const uint16_t colors[CLR_COUNT] = {
-    [CLR_BLACK]   = COLOR_BLACK,
-    [CLR_WHITE]   = COLOR_WHITE,
-    [CLR_RED]     = COLOR_RED,
-    [CLR_GREEN]   = COLOR_GREEN,
-    [CLR_BLUE]    = COLOR_BLUE,
-    [CLR_YELLOW]  = COLOR_YELLOW,
-    [CLR_CYAN]    = COLOR_CYAN,
-    [CLR_MAGENTA] = COLOR_MAGENTA,
-    [CLR_ORANGE]  = COLOR_ORANGE,
-    [CLR_GRAY]    = COLOR_GRAY,
-};
-
 
 int main(void)
 {
@@ -55,13 +26,27 @@ int main(void)
     SystemClock_Config();
 
     /* Core controller state first */
-    PI_Init(&ctx_vel, 20.0f, 0.5f, 0.0002f, -100, 100);   // 5 kHz
-    PI_Init(&ctx_pos, 10.0f, 1.0f, 0.002f, -200, 200);    // 500 Hz
+    PI_Init(&ctx_vel,
+            CONTROL_DEFAULT_VEL_KP,
+            CONTROL_DEFAULT_VEL_KI,
+            1.0f / CONTROL_DEFAULT_VEL_HZ,
+            CONTROL_DEFAULT_VEL_RANGE_PWM,
+            CONTROL_DEFAULT_VEL_ERR_RPM);
+
+    PI_Init(&ctx_pos,
+            CONTROL_DEFAULT_POS_KP,
+            CONTROL_DEFAULT_POS_KI,
+            1.0f / CONTROL_DEFAULT_POS_HZ,
+            CONTROL_DEFAULT_POS_RANGE_RPM,
+            CONTROL_DEFAULT_POS_ERR_DEG);
+
+    Control_InitPresetsFromCurrent();                     // seed P1/P2
 
     /* GPIO / motor output hardware */
     GPIOC_C3_C4_Output_Init();
     GPIOC_C5_C6_Output_Init();
     setup_TIM1_A8();
+    OverCurrent_Init();
 
     /* Sensor / input hardware */
     Encoder_Config();          // motor encoder
